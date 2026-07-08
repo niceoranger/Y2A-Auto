@@ -1061,6 +1061,16 @@ def init_db():
             logger.info("数据库升级：添加bilibili_upload_response字段")
             conn.commit()
 
+        if 'upload_targets' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN upload_targets TEXT")
+            logger.info("数据库升级：添加upload_targets字段")
+            conn.commit()
+
+        if 'sau_upload_responses' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN sau_upload_responses TEXT")
+            logger.info("数据库升级：添加sau_upload_responses字段")
+            conn.commit()
+
         if 'recommended_partition_id_acfun' not in columns:
             cursor.execute("ALTER TABLE tasks ADD COLUMN recommended_partition_id_acfun TEXT")
             logger.info("数据库升级：添加recommended_partition_id_acfun字段")
@@ -1200,6 +1210,35 @@ def init_db():
                 logger.warning("数据库升级：历史任务分区字段回填迁移失败，将在下次启动重试: %s", e2)
         else:
             logger.info("数据库升级：历史任务分区字段回填迁移已执行，跳过")
+
+        # 一次性回填:旧 upload_target 单枚举 -> upload_targets JSON 列表
+        cursor.execute(
+            "SELECT 1 FROM schema_migrations WHERE migration_key = ? LIMIT 1",
+            ('tasks_upload_targets_backfill_v1',)
+        )
+        upload_targets_backfill_done = cursor.fetchone() is not None
+        if not upload_targets_backfill_done:
+            try:
+                from modules.platform_registry import migrate_legacy_upload_target
+                cursor.execute("SELECT id, upload_target, upload_targets FROM tasks")
+                rows = cursor.fetchall()
+                for tid, legacy, existing in rows:
+                    if existing:
+                        continue  # 已有值不覆盖
+                    targets = migrate_legacy_upload_target(legacy) or ['acfun']
+                    cursor.execute(
+                        "UPDATE tasks SET upload_targets = ? WHERE id = ?",
+                        (json.dumps(targets, ensure_ascii=False), tid)
+                    )
+                conn.commit()
+                cursor.execute(
+                    "INSERT INTO schema_migrations (migration_key) VALUES (?)",
+                    ('tasks_upload_targets_backfill_v1',)
+                )
+                conn.commit()
+                logger.info("数据库升级：历史任务 upload_targets 回填迁移完成")
+            except Exception as e:
+                logger.warning(f"upload_targets 回填迁移失败(将在下次启动重试): {e}")
 
         if 'asr_warning_message' not in columns:
             cursor.execute("ALTER TABLE tasks ADD COLUMN asr_warning_message TEXT")
