@@ -25,8 +25,6 @@ from .ffmpeg_manager import get_ffmpeg_path, get_ffprobe_path
 from .platform_registry import (
     normalize_upload_targets,
     get_pending_platforms as _registry_pending,
-    is_sau_platform,
-    is_native_platform,
     sau_name_for,
     migrate_legacy_upload_target,
 )
