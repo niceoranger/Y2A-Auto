@@ -75,7 +75,18 @@ DEFAULT_CONFIG = {
     "COOKIECLOUD_LAST_SYNC_MESSAGE": "",
     "ACFUN_USERNAME": "",
     "ACFUN_PASSWORD": "",
-    "UPLOAD_TARGET_DEFAULT": "acfun",  # 任务默认投稿平台：acfun|bilibili|both
+    "UPLOAD_TARGET_DEFAULT": "acfun",  # [已废弃,仅向后兼容] 旧单枚举:acfun|bilibili|both
+    # 多选投稿平台列表(新):如 ["bilibili","douyin"]。空列表视为 ["acfun"]
+    "UPLOAD_TARGETS": ["acfun"],
+    # social-auto-upload 集成
+    "SAU_BIN": "/Users/mac/sau-venv/bin/sau",  # sau 可执行文件绝对路径
+    "SAU_UPLOAD_TIMEOUT_SECONDS": 1800,         # 单次 sau 上传子进程超时
+    "SAU_ACCOUNT_DOUYIN": "",
+    "SAU_ACCOUNT_KUAISHOU": "",
+    "SAU_ACCOUNT_XIAOHONGSHU": "",
+    "SAU_ACCOUNT_TENCENT": "",
+    "SAU_ACCOUNT_BAIJIAHAO": "",
+    "SAU_ACCOUNT_TIKTOK": "",
     "OPENAI_API_KEY": "",
     "OPENAI_BASE_URL": "https://api.openai.com/v1",
     "OPENAI_MODEL_NAME": "gpt-3.5-turbo",
@@ -252,6 +263,16 @@ def _prune_unknown_config_keys(config_data):
     return clean_config, removed_keys
 
 
+def _normalize_upload_targets_value(value):
+    """归一化 UPLOAD_TARGETS 配置值 -> 合法平台列表。"""
+    from .platform_registry import normalize_upload_targets, migrate_legacy_upload_target
+    if value is None or value == '':
+        return []
+    if isinstance(value, str) and value.strip().lower() in ('acfun', 'bilibili', 'both'):
+        return migrate_legacy_upload_target(value)
+    return normalize_upload_targets(value)
+
+
 def load_config():
     """
     加载配置文件，如果不存在则创建默认配置
@@ -297,6 +318,16 @@ def load_config():
                 config['UPLOAD_TARGET_DEFAULT'] = upload_target_normalized
                 upload_target_changed = config['UPLOAD_TARGET_DEFAULT'] != upload_target_before
 
+                # 多选平台列表:若 UPLOAD_TARGETS 缺失/为空,从旧 UPLOAD_TARGET_DEFAULT 迁移
+                from .platform_registry import migrate_legacy_upload_target, normalize_upload_targets
+                upload_targets_before = config.get('UPLOAD_TARGETS')
+                if not upload_targets_before:
+                    config['UPLOAD_TARGETS'] = migrate_legacy_upload_target(upload_target_normalized)
+                else:
+                    config['UPLOAD_TARGETS'] = normalize_upload_targets(upload_targets_before) \
+                        or ['acfun']
+                upload_targets_changed = config['UPLOAD_TARGETS'] != list(upload_targets_before or [])
+
                 quality_mode_before = config.get('YOUTUBE_DOWNLOAD_QUALITY_MODE')
                 config['YOUTUBE_DOWNLOAD_QUALITY_MODE'] = normalize_youtube_download_quality_mode(
                     quality_mode_before
@@ -337,6 +368,7 @@ def load_config():
                     missing_keys
                     or encoder_changed
                     or upload_target_changed
+                    or upload_targets_changed
                     or quality_mode_changed
                     or quality_height_changed
                     or session_timeout_changed
