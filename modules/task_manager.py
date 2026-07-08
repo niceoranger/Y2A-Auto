@@ -28,6 +28,7 @@ from .platform_registry import (
     is_sau_platform,
     is_native_platform,
     sau_name_for,
+    migrate_legacy_upload_target,
 )
 from .notifications import (
     EVENT_TASK_ADDED,
@@ -558,7 +559,6 @@ def _get_task_upload_targets(task, fallback=None):
     优先级:task['upload_targets'] > task['upload_target'](旧枚举迁移) > fallback > ['acfun']。
     永不返回空(空则回退 ['acfun'])。
     """
-    from modules.platform_registry import normalize_upload_targets, migrate_legacy_upload_target
     if task:
         raw = task.get('upload_targets')
         if raw:
@@ -577,11 +577,6 @@ def _get_task_upload_targets(task, fallback=None):
     return ['acfun']
 
 
-def _task_has_sau_upload_response(task, platform):
-    from modules.platform_registry import _task_has_platform_upload_response
-    return _task_has_platform_upload_response(task, platform)
-
-
 def _record_sau_upload_response(task_id, platform, result):
     """把一个 sau 平台的上传结果合并写入 sau_upload_responses(JSON dict)。"""
     task = get_task(task_id) or {}
@@ -591,7 +586,9 @@ def _record_sau_upload_response(task_id, platform, result):
     except (ValueError, TypeError):
         data = {}
     data[platform] = result
-    update_task(task_id, sau_upload_responses=json.dumps(data, ensure_ascii=False), silent=True)
+    ok = update_task(task_id, sau_upload_responses=json.dumps(data, ensure_ascii=False), silent=True)
+    if not ok:
+        logger.warning("_record_sau_upload_response: update_task failed for task_id=%s platform=%s", task_id, platform)
 
 
 def _has_partial_upload_success(task, upload_target=None):
@@ -1486,6 +1483,8 @@ def update_task(task_id, silent=False, **kwargs):
         'bilibili_upload_response': 'bilibili_upload_response = ?',
         'asr_warning_message': 'asr_warning_message = ?',
         'subtitle_warning_message': 'subtitle_warning_message = ?',
+        'sau_upload_responses': 'sau_upload_responses = ?',
+        'upload_targets': 'upload_targets = ?',
     }
 
     # 过滤掉不在白名单中的列
