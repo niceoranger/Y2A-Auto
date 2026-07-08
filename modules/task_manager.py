@@ -22,6 +22,13 @@ from apscheduler.schedulers.base import SchedulerNotRunningError
 import queue
 from .utils import get_app_subdir
 from .ffmpeg_manager import get_ffmpeg_path, get_ffprobe_path
+from .platform_registry import (
+    normalize_upload_targets,
+    get_pending_platforms as _registry_pending,
+    is_sau_platform,
+    is_native_platform,
+    sau_name_for,
+)
 from .notifications import (
     EVENT_TASK_ADDED,
     EVENT_TASK_COMPLETED,
@@ -543,6 +550,48 @@ def _get_pending_upload_platforms(task, upload_target=None):
     target = normalize_upload_target(upload_target or task.get('upload_target'))
     platforms = _get_upload_platforms_for_target(target)
     return [p for p in platforms if not _task_has_platform_upload_response(task, p)]
+
+
+def _get_task_upload_targets(task, fallback=None):
+    """读取任务的多选平台列表。
+
+    优先级:task['upload_targets'] > task['upload_target'](旧枚举迁移) > fallback > ['acfun']。
+    永不返回空(空则回退 ['acfun'])。
+    """
+    from modules.platform_registry import normalize_upload_targets, migrate_legacy_upload_target
+    if task:
+        raw = task.get('upload_targets')
+        if raw:
+            norm = normalize_upload_targets(raw)
+            if norm:
+                return norm
+        legacy = task.get('upload_target')
+        if legacy:
+            mig = migrate_legacy_upload_target(legacy)
+            if mig:
+                return mig
+    if fallback:
+        norm = normalize_upload_targets(fallback)
+        if norm:
+            return norm
+    return ['acfun']
+
+
+def _task_has_sau_upload_response(task, platform):
+    from modules.platform_registry import _task_has_platform_upload_response
+    return _task_has_platform_upload_response(task, platform)
+
+
+def _record_sau_upload_response(task_id, platform, result):
+    """把一个 sau 平台的上传结果合并写入 sau_upload_responses(JSON dict)。"""
+    task = get_task(task_id) or {}
+    raw = task.get('sau_upload_responses') or '{}'
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except (ValueError, TypeError):
+        data = {}
+    data[platform] = result
+    update_task(task_id, sau_upload_responses=json.dumps(data, ensure_ascii=False), silent=True)
 
 
 def _has_partial_upload_success(task, upload_target=None):
