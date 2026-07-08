@@ -7556,7 +7556,6 @@ class TaskProcessor:
         # --- 多平台分发(新):平台列表遍历,单平台失败不阻塞其他 ---
         from modules.platform_registry import (
             get_pending_platforms as _registry_pending,
-            is_native_platform, is_sau_platform,
         )
         config_targets = self.config.get('UPLOAD_TARGETS', None) if getattr(self, 'config', None) else None
         targets = _get_task_upload_targets(task, fallback=config_targets)
@@ -7583,12 +7582,15 @@ class TaskProcessor:
             try:
                 if platform == 'acfun':
                     self._upload_to_acfun(task_id, task_logger, subtitle_prepared=subtitle_prepared)
+                    any_success = True
                     subtitle_prepared = True
                 elif platform == 'bilibili':
                     self._upload_to_bilibili(task_id, task_logger, subtitle_prepared=subtitle_prepared)
+                    any_success = True
                     subtitle_prepared = True
                 else:
                     self._upload_to_sau_platform(task_id, task_logger, platform)
+                    any_success = True
             except Exception as e:
                 import traceback
                 task_logger.error(f"平台 {platform} 上传异常: {e}\n{traceback.format_exc()}")
