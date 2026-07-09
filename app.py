@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import shutil
+import subprocess
 import time
 import uuid
 import threading
@@ -1884,12 +1885,7 @@ def add_task_via_extension():
         if not upload_target:
             upload_target = config.get('UPLOAD_TARGET_DEFAULT', 'acfun')
 
-        upload_targets = None
-        try:
-            if data is not None:
-                upload_targets = data.get('upload_targets')
-        except Exception:
-            upload_targets = None
+        upload_targets = data.get('upload_targets') if data else None
         if not upload_targets:
             upload_targets = request.form.get('upload_targets') or None
 
@@ -2711,9 +2707,8 @@ def settings_test_cookiecloud():
 
 
 @app.route('/settings/sau/health', methods=['GET'])
+@login_required
 def sau_health_check():
-    import subprocess
-    from modules.config_manager import load_config
     cfg = load_config()
     sau_bin = str(cfg.get('SAU_BIN', '') or '').strip()
     if not sau_bin:
