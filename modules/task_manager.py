@@ -1363,19 +1363,18 @@ def add_task(youtube_url, upload_target=None, upload_targets=None):
 
     try:
         # 多选列表优先;其次旧枚举;最后配置默认 UPLOAD_TARGETS
-        from modules.platform_registry import normalize_upload_targets as _norm_targets, migrate_legacy_upload_target as _migrate_legacy
-        targets = _norm_targets(upload_targets)
+        targets = normalize_upload_targets(upload_targets)
         if not targets:
-            targets = _migrate_legacy(upload_target) or []
+            targets = migrate_legacy_upload_target(upload_target) or []
         if not targets:
             try:
                 from modules.config_manager import load_config
                 cfg = load_config()
-                targets = _norm_targets(cfg.get('UPLOAD_TARGETS')) or ['acfun']
+                targets = normalize_upload_targets(cfg.get('UPLOAD_TARGETS')) or ['acfun']
             except Exception:
                 targets = ['acfun']
 
-        # 旧列保留(单枚举,向后兼容),新列写 JSON 列表
+        # 旧列仅容纳 acfun|bilibili|both;非原生平台退化为 acfun,真值以新列 upload_targets 为准
         legacy_for_old_col = upload_target or (
             'both' if len(targets) > 1 else (targets[0] if targets else 'acfun')
         )
