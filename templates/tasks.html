@@ -155,14 +155,33 @@
                         <div class="form-text">支持标准YouTube视频链接</div>
                     </div>
                     <div class="mb-3">
-                        <label for="upload_target" class="form-label">目标平台</label>
+                        <label class="form-label">目标平台（可多选）</label>
                         {% set default_target = (config.get('UPLOAD_TARGET_DEFAULT', 'acfun'))|lower %}
-                        <select class="form-select" id="upload_target" name="upload_target">
-                            <option value="acfun" {% if default_target == 'acfun' %}selected{% endif %}>AcFun</option>
-                            <option value="bilibili" {% if default_target == 'bilibili' %}selected{% endif %}>bilibili</option>
-                            <option value="both" {% if default_target == 'both' %}selected{% endif %}>双平台（AcFun + bilibili）</option>
-                        </select>
-                        <div class="form-text">不选择时将使用系统默认平台</div>
+                        {% set current_targets = config.UPLOAD_TARGETS or [default_target if default_target != 'both' else 'acfun'] %}
+                        {% set legacy_map = {'acfun': ['acfun'], 'bilibili': ['bilibili'], 'both': ['acfun', 'bilibili']} %}
+                        {% set checked_targets = (legacy_map.get(default_target) or ['acfun']) if not config.UPLOAD_TARGETS else current_targets %}
+                        <div id="upload-targets-group" class="d-flex flex-wrap gap-2">
+                            {% if platform_registry %}
+                                {% for key, info in platform_registry.items() %}
+                                <div class="form-check">
+                                    <input class="form-check-input upload-target-chk" type="checkbox"
+                                           name="upload_targets" value="{{ key }}" id="modal_ut_{{ key }}"
+                                           {% if key in checked_targets %}checked{% endif %}>
+                                    <label class="form-check-label" for="modal_ut_{{ key }}">{{ key }}</label>
+                                </div>
+                                {% endfor %}
+                            {% else %}
+                                <div class="form-check">
+                                    <input class="form-check-input upload-target-chk" type="checkbox" name="upload_targets" value="acfun" id="modal_ut_acfun" checked>
+                                    <label class="form-check-label" for="modal_ut_acfun">acfun</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input upload-target-chk" type="checkbox" name="upload_targets" value="bilibili" id="modal_ut_bilibili" {% if default_target == 'bilibili' or default_target == 'both' %}checked{% endif %}>
+                                    <label class="form-check-label" for="modal_ut_bilibili">bilibili</label>
+                                </div>
+                            {% endif %}
+                        </div>
+                        <div class="form-text">至少勾选一个；不勾选时将使用系统默认平台。</div>
                     </div>
                 </div>
                 <div class="modal-footer">

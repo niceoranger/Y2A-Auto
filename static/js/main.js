@@ -41,6 +41,29 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // --- 设置页面：sau 健康状态徽章 ---
+    fetch('/settings/sau/health').then(function(r) { return r.json(); }).then(function(d) {
+        const el = document.getElementById('sau-health');
+        if (!el) return;
+        const msg = (d && d.message) ? d.message : '';
+        if (d && d.ok) {
+            el.innerHTML = '<span class="badge bg-success">sau 可用: ' + msg + '</span>';
+        } else {
+            el.innerHTML = '<span class="badge bg-danger">sau 不可用: ' + msg + '</span>';
+        }
+    }).catch(function() { /* 静默失败，保留默认徽章 */ });
+
+    // --- 任务页：新建任务表单至少勾选一个平台 ---
+    const addTaskModalForm = document.querySelector('#addTaskModal form');
+    if (addTaskModalForm) {
+        addTaskModalForm.addEventListener('submit', function(event) {
+            const checked = addTaskModalForm.querySelectorAll('input.upload-target-chk:checked');
+            if (checked.length === 0) {
+                event.preventDefault();
+                alert('请至少勾选一个目标平台。');
+            }
+        });
+    }
 
     // --- 设置页面的日志清理按钮逻辑 ---
     // 绑定手动日志清理按钮

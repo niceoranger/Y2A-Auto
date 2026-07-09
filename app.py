@@ -1528,29 +1528,53 @@ def index():
 
     return render_template('index.html', stats=stats, recent_tasks=recent_tasks)
 
+def _serialize_tasks_for_template(tasks_list):
+    """Parse sau_upload_responses JSON into sau_upload_responses_dict for each task."""
+    for t in tasks_list:
+        try:
+            t['sau_upload_responses_dict'] = json.loads(t.get('sau_upload_responses') or '{}')
+        except Exception:
+            t['sau_upload_responses_dict'] = {}
+    return tasks_list
+
+
+def _task_serialized_for_template(task):
+    """Parse sau_upload_responses JSON into sau_upload_responses_dict for a single task dict."""
+    if task is None:
+        return None
+    try:
+        task['sau_upload_responses_dict'] = json.loads(task.get('sau_upload_responses') or '{}')
+    except Exception:
+        task['sau_upload_responses_dict'] = {}
+    return task
+
+
 @app.route('/tasks')
 @login_required
 def tasks():
     """任务列表页面"""
     logger.info("访问任务列表页面")
-    
+
     # 获取分页参数
     page = request.args.get('page', 1, type=int)
     per_page = 20  # 每页显示20条记录
-    
+
     # 获取分页数据
     pagination_data = get_tasks_paginated(page=page, per_page=per_page)
+    _serialize_tasks_for_template(pagination_data['tasks'])
     config = load_config()
     
-    return render_template('tasks.html', 
+    return render_template('tasks.html',
                          tasks=pagination_data['tasks'],
                          pagination=pagination_data,
-                         config=config)
+                         config=config,
+                         platform_registry=PLATFORMS)
 
 
 def _render_task_fragments(task: dict, config: dict | None = None) -> dict:
     if config is None:
         config = load_config()
+    _task_serialized_for_template(task)
 
     return {
         'task_id': task.get('id'),
@@ -1657,9 +1681,10 @@ def manual_review():
     """人工审核列表页面"""
     logger.info("访问人工审核列表页面")
     review_tasks = get_tasks_by_status(TASK_STATES['AWAITING_REVIEW'])
-    
+    _serialize_tasks_for_template(review_tasks)
+
     # 封面图片现在直接从downloads目录提供
-    
+
     return render_template('manual_review.html', tasks=review_tasks)
 
 @app.route('/tasks/<task_id>/edit', methods=['GET', 'POST'])
@@ -1774,6 +1799,7 @@ def edit_task(task_id):
     # GET请求，显示编辑页面
     # 封面图片现在直接从downloads目录提供
     upload_target = str(task.get('upload_target') or 'acfun').lower()
+    _task_serialized_for_template(task)
     acfun_id_mapping = _load_acfun_partition_mapping()
     bilibili_id_mapping = _build_bilibili_partition_mapping()
     id_mapping = bilibili_id_mapping if upload_target == 'bilibili' else acfun_id_mapping
