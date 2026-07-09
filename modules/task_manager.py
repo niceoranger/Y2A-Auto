@@ -27,6 +27,7 @@ from .platform_registry import (
     get_pending_platforms as _registry_pending,
     sau_name_for,
     migrate_legacy_upload_target,
+    _task_has_platform_upload_response,
 )
 from .notifications import (
     EVENT_TASK_ADDED,
@@ -7552,9 +7553,6 @@ class TaskProcessor:
                 return
 
         # --- 多平台分发(新):平台列表遍历,单平台失败不阻塞其他 ---
-        from modules.platform_registry import (
-            get_pending_platforms as _registry_pending,
-        )
         config_targets = self.config.get('UPLOAD_TARGETS', None) if getattr(self, 'config', None) else None
         targets = _get_task_upload_targets(task, fallback=config_targets)
         task_logger.info(f"上传分发目标平台: {targets}")
@@ -7580,32 +7578,25 @@ class TaskProcessor:
             try:
                 if platform == 'acfun':
                     self._upload_to_acfun(task_id, task_logger, subtitle_prepared=subtitle_prepared)
-                    any_success = True
                     subtitle_prepared = True
                 elif platform == 'bilibili':
                     self._upload_to_bilibili(task_id, task_logger, subtitle_prepared=subtitle_prepared)
-                    any_success = True
                     subtitle_prepared = True
                 else:
-                    self._upload_to_sau_platform(task_id, task_logger, platform)
-                    any_success = True
+                    self._upload_to_sau_platform(task_id, task_logger, platform, subtitle_prepared=subtitle_prepared)
+                    subtitle_prepared = True
             except Exception as e:
                 import traceback
                 task_logger.error(f"平台 {platform} 上传异常: {e}\n{traceback.format_exc()}")
 
+            # 用实际响应判定该平台是否成功(不能只看"调用返回")
             task = get_task(task_id)
-            if task and _registry_pending(task, targets):
-                pass  # still pending, continue loop
-            if task and task.get('status') == TASK_STATES['FAILED'] and not any_success \
-                    and not _registry_pending(task, targets):
-                return
+            if task and _task_has_platform_upload_response(task, platform):
+                any_success = True
 
-        # 所有平台尝试完毕
+        # 所有平台尝试完毕:至少一个真实成功才 COMPLETED,否则保持 FAILED(由各平台方法已设置)
         task = get_task(task_id)
-        if task and task.get('status') != TASK_STATES['FAILED']:
-            update_task(task_id, status=TASK_STATES['COMPLETED'],
-                        error_message=None, upload_progress=None)
-        elif task and any_success:
+        if task and any_success and task.get('status') != TASK_STATES['COMPLETED']:
             update_task(task_id, status=TASK_STATES['COMPLETED'],
                         error_message=None, upload_progress=None)
 
@@ -7954,7 +7945,7 @@ class TaskProcessor:
                 error_message=f"上传异常: {str(e)}"
             )
 
-    def _upload_to_sau_platform(self, task_id, task_logger, platform):
+    def _upload_to_sau_platform(self, task_id, task_logger, platform, subtitle_prepared=False):
         """通过 social-auto-upload 上传到指定 sau 平台(带并发控制)。"""
         from modules.platform_registry import sau_name_for
         from modules.sau_uploader import SauPlatformUploader
@@ -7988,6 +7979,11 @@ class TaskProcessor:
             self._download_video_file(task_id, youtube_url, task_logger)
             task = get_task(task_id)
             video_path = task.get('video_path_local', '') if task else ''
+
+        # 字幕预处理(与原生路径一致:首次上传前做一次)
+        if not subtitle_prepared:
+            task = self._prepare_subtitle_for_upload(task_id, task_logger) or task
+            video_path = task.get('video_path_local', '') if task else video_path
 
         if not video_path or not os.path.exists(video_path):
             update_task(task_id, status=TASK_STATES['FAILED'], error_message="视频文件缺失")
