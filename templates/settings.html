@@ -266,7 +266,7 @@
                                                                     {{ key }}
                                                                     {% if info.kind == 'sau' %}
                                                                         <input class="form-control form-control-sm d-inline-block w-auto ms-2"
-                                                                               name="sau_account_{{ key }}" placeholder="sau 账号名(--account)"
+                                                                               name="SAU_ACCOUNT_{{ key.upper() }}" placeholder="sau 账号名(--account)"
                                                                                value="{{ config['SAU_ACCOUNT_' ~ key.upper()] }}">
                                                                     {% endif %}
                                                                 </label>

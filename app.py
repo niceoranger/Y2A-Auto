@@ -1913,7 +1913,7 @@ def add_task_via_extension():
 
         upload_targets = data.get('upload_targets') if data else None
         if not upload_targets:
-            upload_targets = request.form.get('upload_targets') or None
+            upload_targets = request.form.getlist('upload_targets') or None
 
         # 判断是否为播放列表URL
         if 'youtube.com/playlist' in youtube_url or 'youtu.be/playlist' in youtube_url:
@@ -1980,7 +1980,7 @@ def add_task_route():
     if not upload_target:
         upload_target = config.get('UPLOAD_TARGET_DEFAULT', 'acfun')
 
-    upload_targets = request.form.get('upload_targets') or None
+    upload_targets = request.form.getlist('upload_targets') or None
 
     # 判断是否为播放列表URL
     if 'youtube.com/playlist' in youtube_url or 'youtu.be/playlist' in youtube_url:
@@ -2552,6 +2552,8 @@ def settings():
     if request.method == 'POST':
         config = load_config()
         form_data = request.form.to_dict()
+        # 多选 checkbox 必须用 getlist,否则 to_dict 只留最后一个值
+        form_data['UPLOAD_TARGETS'] = request.form.getlist('upload_targets')
         uploads = _extract_settings_uploads(request.files)
         operation_id = str(form_data.get('save_operation_id') or uuid.uuid4())
         enable_password_protection = str(form_data.get('password_protection_enabled', '')).lower() in ['true', '1', 'on']
