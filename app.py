@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import shutil
+import subprocess
 import time
 import uuid
 import threading
@@ -22,6 +23,7 @@ from modules.utils import get_app_subdir
 from modules.config_manager import load_config, update_config, reset_specific_config
 from modules.whisper_languages import WHISPER_LANGUAGE_LIST
 from modules.task_manager import add_task, start_task, get_task, get_tasks_paginated, get_tasks_by_status, update_task, delete_task, force_upload_task, TASK_STATES, clear_all_tasks, retry_failed_tasks, register_task_updates_listener, unregister_task_updates_listener, resolve_cookie_file_path
+from modules.platform_registry import PLATFORMS, sau_platforms
 from modules.acfun_auth import AcfunQrLoginSession
 from modules.bilibili_auth import BilibiliQrLoginSession
 from queue import Empty
@@ -1526,29 +1528,53 @@ def index():
 
     return render_template('index.html', stats=stats, recent_tasks=recent_tasks)
 
+def _serialize_tasks_for_template(tasks_list):
+    """Parse sau_upload_responses JSON into sau_upload_responses_dict for each task."""
+    for t in tasks_list:
+        try:
+            t['sau_upload_responses_dict'] = json.loads(t.get('sau_upload_responses') or '{}')
+        except Exception:
+            t['sau_upload_responses_dict'] = {}
+    return tasks_list
+
+
+def _task_serialized_for_template(task):
+    """Parse sau_upload_responses JSON into sau_upload_responses_dict for a single task dict."""
+    if task is None:
+        return None
+    try:
+        task['sau_upload_responses_dict'] = json.loads(task.get('sau_upload_responses') or '{}')
+    except Exception:
+        task['sau_upload_responses_dict'] = {}
+    return task
+
+
 @app.route('/tasks')
 @login_required
 def tasks():
     """任务列表页面"""
     logger.info("访问任务列表页面")
-    
+
     # 获取分页参数
     page = request.args.get('page', 1, type=int)
     per_page = 20  # 每页显示20条记录
-    
+
     # 获取分页数据
     pagination_data = get_tasks_paginated(page=page, per_page=per_page)
+    _serialize_tasks_for_template(pagination_data['tasks'])
     config = load_config()
     
-    return render_template('tasks.html', 
+    return render_template('tasks.html',
                          tasks=pagination_data['tasks'],
                          pagination=pagination_data,
-                         config=config)
+                         config=config,
+                         platform_registry=PLATFORMS)
 
 
 def _render_task_fragments(task: dict, config: dict | None = None) -> dict:
     if config is None:
         config = load_config()
+    _task_serialized_for_template(task)
 
     return {
         'task_id': task.get('id'),
@@ -1655,9 +1681,10 @@ def manual_review():
     """人工审核列表页面"""
     logger.info("访问人工审核列表页面")
     review_tasks = get_tasks_by_status(TASK_STATES['AWAITING_REVIEW'])
-    
+    _serialize_tasks_for_template(review_tasks)
+
     # 封面图片现在直接从downloads目录提供
-    
+
     return render_template('manual_review.html', tasks=review_tasks)
 
 @app.route('/tasks/<task_id>/edit', methods=['GET', 'POST'])
@@ -1772,6 +1799,7 @@ def edit_task(task_id):
     # GET请求，显示编辑页面
     # 封面图片现在直接从downloads目录提供
     upload_target = str(task.get('upload_target') or 'acfun').lower()
+    _task_serialized_for_template(task)
     acfun_id_mapping = _load_acfun_partition_mapping()
     bilibili_id_mapping = _build_bilibili_partition_mapping()
     id_mapping = bilibili_id_mapping if upload_target == 'bilibili' else acfun_id_mapping
@@ -1882,7 +1910,11 @@ def add_task_via_extension():
         config = load_config()
         if not upload_target:
             upload_target = config.get('UPLOAD_TARGET_DEFAULT', 'acfun')
-        
+
+        upload_targets = data.get('upload_targets') if data else None
+        if not upload_targets:
+            upload_targets = request.form.getlist('upload_targets') or None
+
         # 判断是否为播放列表URL
         if 'youtube.com/playlist' in youtube_url or 'youtu.be/playlist' in youtube_url:
             # 提取所有视频URL
@@ -1890,18 +1922,18 @@ def add_task_via_extension():
             video_urls = extract_video_urls_from_playlist(youtube_url, cookies_path)
             if not video_urls:
                 return jsonify({'success': False, 'message': '未能提取到播放列表中的视频'}), 400
-            
+
             added_count = 0
             task_ids = []
             for url in video_urls:
-                task_id = add_task(url, upload_target=upload_target)
+                task_id = add_task(url, upload_target=upload_target, upload_targets=upload_targets)
                 if task_id:
                     added_count += 1
                     task_ids.append(task_id)
                     # 自动模式下启动任务
                     if config.get('AUTO_MODE_ENABLED', False):
                         start_task(task_id, config)
-            
+
             return jsonify({
                 'success': True,
                 'message': f'已批量添加 {added_count} 个视频任务（来自播放列表）',
@@ -1910,7 +1942,7 @@ def add_task_via_extension():
             }), 200
         else:
             # 单个视频
-            task_id = add_task(youtube_url, upload_target=upload_target)
+            task_id = add_task(youtube_url, upload_target=upload_target, upload_targets=upload_targets)
             if task_id:
                 if config.get('AUTO_MODE_ENABLED', False):
                     logger.info(f"自动模式已启用，立即开始处理任务 {task_id}")
@@ -1948,6 +1980,8 @@ def add_task_route():
     if not upload_target:
         upload_target = config.get('UPLOAD_TARGET_DEFAULT', 'acfun')
 
+    upload_targets = request.form.getlist('upload_targets') or None
+
     # 判断是否为播放列表URL
     if 'youtube.com/playlist' in youtube_url or 'youtu.be/playlist' in youtube_url:
         # 提取所有视频URL
@@ -1958,13 +1992,13 @@ def add_task_route():
             return redirect(url_for('tasks'))
         added_count = 0
         for url in video_urls:
-            task_id = add_task(url, upload_target=upload_target)
+            task_id = add_task(url, upload_target=upload_target, upload_targets=upload_targets)
             if task_id:
                 added_count += 1
         flash(f'已批量添加 {added_count} 个视频任务（来自播放列表）', 'success')
         return redirect(url_for('tasks'))
     else:
-        task_id = add_task(youtube_url, upload_target=upload_target)
+        task_id = add_task(youtube_url, upload_target=upload_target, upload_targets=upload_targets)
         if task_id:
             if config.get('AUTO_MODE_ENABLED', False):
                 logger.info(f"自动模式已启用，立即开始处理任务 {task_id}")
@@ -2518,6 +2552,8 @@ def settings():
     if request.method == 'POST':
         config = load_config()
         form_data = request.form.to_dict()
+        # 多选 checkbox 必须用 getlist,否则 to_dict 只留最后一个值
+        form_data['UPLOAD_TARGETS'] = request.form.getlist('upload_targets')
         uploads = _extract_settings_uploads(request.files)
         operation_id = str(form_data.get('save_operation_id') or uuid.uuid4())
         enable_password_protection = str(form_data.get('password_protection_enabled', '')).lower() in ['true', '1', 'on']
@@ -2584,6 +2620,8 @@ def settings():
         acfun_partition_mapping=acfun_partition_mapping,
         bilibili_partition_mapping=bilibili_partition_mapping,
         builtin_prompts=builtin_prompts,
+        platform_registry=PLATFORMS,
+        sau_platforms=sau_platforms(),
     )
 
 
@@ -2694,6 +2732,25 @@ def settings_test_cookiecloud():
             'updated_at': updated_at,
             'status': 'error',
         }), 500
+
+
+@app.route('/settings/sau/health', methods=['GET'])
+@login_required
+def sau_health_check():
+    cfg = load_config()
+    sau_bin = str(cfg.get('SAU_BIN', '') or '').strip()
+    if not sau_bin:
+        return jsonify({'ok': False, 'message': '未配置 SAU_BIN'})
+    if not os.path.isfile(sau_bin):
+        return jsonify({'ok': False, 'message': f'sau 路径无效: {sau_bin}'})
+    try:
+        proc = subprocess.run([sau_bin, '--version'], capture_output=True,
+                              text=True, timeout=10)
+        ok = (proc.returncode == 0)
+        return jsonify({'ok': ok,
+                        'message': proc.stdout.strip() or proc.stderr.strip() or ('ok' if ok else '失败')})
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'sau 调用失败: {e}'})
 
 
 @app.route('/settings/cookiecloud/sync', methods=['POST'])

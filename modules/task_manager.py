@@ -22,6 +22,13 @@ from apscheduler.schedulers.base import SchedulerNotRunningError
 import queue
 from .utils import get_app_subdir
 from .ffmpeg_manager import get_ffmpeg_path, get_ffprobe_path
+from .platform_registry import (
+    normalize_upload_targets,
+    get_pending_platforms as _registry_pending,
+    sau_name_for,
+    migrate_legacy_upload_target,
+    _task_has_platform_upload_response,
+)
 from .notifications import (
     EVENT_TASK_ADDED,
     EVENT_TASK_COMPLETED,
@@ -480,15 +487,6 @@ def _task_has_upload_response(task, upload_target=None):
     return bool(task.get('acfun_upload_response'))
 
 
-def _task_has_platform_upload_response(task, platform):
-    if not task:
-        return False
-    p = normalize_upload_target(platform)
-    if p == UPLOAD_TARGET_BILIBILI:
-        return bool(task.get('bilibili_upload_response'))
-    return bool(task.get('acfun_upload_response'))
-
-
 def _build_task_notification_payload(task, overrides=None) -> dict:
     merged_task = dict(task or {})
     if overrides:
@@ -543,6 +541,44 @@ def _get_pending_upload_platforms(task, upload_target=None):
     target = normalize_upload_target(upload_target or task.get('upload_target'))
     platforms = _get_upload_platforms_for_target(target)
     return [p for p in platforms if not _task_has_platform_upload_response(task, p)]
+
+
+def _get_task_upload_targets(task, fallback=None):
+    """读取任务的多选平台列表。
+
+    优先级:task['upload_targets'] > task['upload_target'](旧枚举迁移) > fallback > ['acfun']。
+    永不返回空(空则回退 ['acfun'])。
+    """
+    if task:
+        raw = task.get('upload_targets')
+        if raw:
+            norm = normalize_upload_targets(raw)
+            if norm:
+                return norm
+        legacy = task.get('upload_target')
+        if legacy:
+            mig = migrate_legacy_upload_target(legacy)
+            if mig:
+                return mig
+    if fallback:
+        norm = normalize_upload_targets(fallback)
+        if norm:
+            return norm
+    return ['acfun']
+
+
+def _record_sau_upload_response(task_id, platform, result):
+    """把一个 sau 平台的上传结果合并写入 sau_upload_responses(JSON dict)。"""
+    task = get_task(task_id) or {}
+    raw = task.get('sau_upload_responses') or '{}'
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except (ValueError, TypeError):
+        data = {}
+    data[platform] = result
+    ok = update_task(task_id, sau_upload_responses=json.dumps(data, ensure_ascii=False), silent=True)
+    if not ok:
+        logger.warning("_record_sau_upload_response: update_task failed for task_id=%s platform=%s", task_id, platform)
 
 
 def _has_partial_upload_success(task, upload_target=None):
@@ -1061,6 +1097,16 @@ def init_db():
             logger.info("数据库升级：添加bilibili_upload_response字段")
             conn.commit()
 
+        if 'upload_targets' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN upload_targets TEXT")
+            logger.info("数据库升级：添加upload_targets字段")
+            conn.commit()
+
+        if 'sau_upload_responses' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN sau_upload_responses TEXT")
+            logger.info("数据库升级：添加sau_upload_responses字段")
+            conn.commit()
+
         if 'recommended_partition_id_acfun' not in columns:
             cursor.execute("ALTER TABLE tasks ADD COLUMN recommended_partition_id_acfun TEXT")
             logger.info("数据库升级：添加recommended_partition_id_acfun字段")
@@ -1201,6 +1247,35 @@ def init_db():
         else:
             logger.info("数据库升级：历史任务分区字段回填迁移已执行，跳过")
 
+        # 一次性回填:旧 upload_target 单枚举 -> upload_targets JSON 列表
+        cursor.execute(
+            "SELECT 1 FROM schema_migrations WHERE migration_key = ? LIMIT 1",
+            ('tasks_upload_targets_backfill_v1',)
+        )
+        upload_targets_backfill_done = cursor.fetchone() is not None
+        if not upload_targets_backfill_done:
+            try:
+                from modules.platform_registry import migrate_legacy_upload_target
+                cursor.execute("SELECT id, upload_target, upload_targets FROM tasks")
+                rows = cursor.fetchall()
+                for tid, legacy, existing in rows:
+                    if existing:
+                        continue  # 已有值不覆盖
+                    targets = migrate_legacy_upload_target(legacy) or ['acfun']
+                    cursor.execute(
+                        "UPDATE tasks SET upload_targets = ? WHERE id = ?",
+                        (json.dumps(targets, ensure_ascii=False), tid)
+                    )
+                conn.commit()
+                cursor.execute(
+                    "INSERT INTO schema_migrations (migration_key) VALUES (?)",
+                    ('tasks_upload_targets_backfill_v1',)
+                )
+                conn.commit()
+                logger.info("数据库升级：历史任务 upload_targets 回填迁移完成")
+            except Exception as e:
+                logger.warning(f"upload_targets 回填迁移失败(将在下次启动重试): {e}")
+
         if 'asr_warning_message' not in columns:
             cursor.execute("ALTER TABLE tasks ADD COLUMN asr_warning_message TEXT")
             logger.info("数据库升级：添加asr_warning_message字段")
@@ -1271,32 +1346,46 @@ def get_db_connection():
         logger.debug(f"设置SQLite连接参数失败，将使用默认参数: {e}")
     return conn
 
-def add_task(youtube_url, upload_target=None):
+def add_task(youtube_url, upload_target=None, upload_targets=None):
     """
     添加新任务到数据库
-    
+
     Args:
         youtube_url: YouTube视频URL
-        upload_target: 投稿平台(acfun|bilibili|both)，为空则使用配置默认值
-        
+        upload_target: 投稿平台(acfun|bilibili|both)，旧的单选枚举，为空则使用配置默认值
+        upload_targets: 投稿平台多选列表(如 ['bilibili','douyin'])，优先于此处的 upload_target
+
     Returns:
         task_id: 新创建的任务ID
     """
     task_id = str(uuid.uuid4())
-    normalized_target = normalize_upload_target(upload_target)
     conn = get_db_connection()
-    
+
     try:
-        if not upload_target:
+        # 多选列表优先;其次旧枚举;最后配置默认 UPLOAD_TARGETS
+        targets = normalize_upload_targets(upload_targets)
+        if not targets:
+            targets = migrate_legacy_upload_target(upload_target) or []
+        if not targets:
             try:
                 from modules.config_manager import load_config
                 cfg = load_config()
-                normalized_target = normalize_upload_target(cfg.get('UPLOAD_TARGET_DEFAULT', UPLOAD_TARGET_ACFUN))
+                targets = normalize_upload_targets(cfg.get('UPLOAD_TARGETS')) or ['acfun']
             except Exception:
-                normalized_target = UPLOAD_TARGET_ACFUN
+                targets = ['acfun']
+
+        # 旧列仅容纳 acfun|bilibili|both;非原生平台退化为 acfun,真值以新列 upload_targets 为准
+        legacy_for_old_col = upload_target or (
+            'both' if len(targets) > 1 else (targets[0] if targets else 'acfun')
+        )
+        if legacy_for_old_col not in ('acfun', 'bilibili', 'both'):
+            legacy_for_old_col = 'acfun'
+        normalized_target = legacy_for_old_col
         conn.execute(
-            'INSERT INTO tasks (id, youtube_url, upload_target, status) VALUES (?, ?, ?, ?)',
-            (task_id, youtube_url, normalized_target, TASK_STATES['PENDING'])
+            'INSERT INTO tasks (id, youtube_url, upload_target, upload_targets, status) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (task_id, youtube_url, normalized_target,
+             json.dumps(targets, ensure_ascii=False), TASK_STATES['PENDING'])
         )
         conn.commit()
         logger.info(f"新任务添加成功, ID: {task_id}, URL: {youtube_url}, 平台: {normalized_target}")
@@ -1398,6 +1487,8 @@ def update_task(task_id, silent=False, **kwargs):
         'bilibili_upload_response': 'bilibili_upload_response = ?',
         'asr_warning_message': 'asr_warning_message = ?',
         'subtitle_warning_message': 'subtitle_warning_message = ?',
+        'sau_upload_responses': 'sau_upload_responses = ?',
+        'upload_targets': 'upload_targets = ?',
     }
 
     # 过滤掉不在白名单中的列
@@ -7466,52 +7557,53 @@ class TaskProcessor:
             if not task:
                 return
 
-        upload_target = _get_task_upload_target(task)
-        pending_platforms = _get_pending_upload_platforms(task, upload_target)
-        task_logger.info(f"上传分发目标平台: {upload_target}")
-        task_logger.info(f"待上传平台: {pending_platforms}")
+        # --- 多平台分发(新):平台列表遍历,单平台失败不阻塞其他 ---
+        config_targets = self.config.get('UPLOAD_TARGETS', None) if getattr(self, 'config', None) else None
+        targets = _get_task_upload_targets(task, fallback=config_targets)
+        task_logger.info(f"上传分发目标平台: {targets}")
 
-        if not pending_platforms:
-            task_logger.info("目标平台均已有上传结果，跳过重复上传")
+        # 字幕预处理:首个原生平台前做一次
+        subtitle_prepared = False
+        pending = _registry_pending(task, targets)
+        task_logger.info(f"待上传平台: {pending}")
+        if not pending:
+            task_logger.info("目标平台均已有上传结果,跳过重复上传")
             if task.get('status') != TASK_STATES['COMPLETED']:
-                update_task(task_id, status=TASK_STATES['COMPLETED'], error_message=None, upload_progress=None)
+                update_task(task_id, status=TASK_STATES['COMPLETED'],
+                            error_message=None, upload_progress=None)
             return
 
-        if upload_target == UPLOAD_TARGET_BOTH:
-            task_logger.info("双平台上传将字幕预处理延后到各平台上传阶段执行，确保视频已下载后再处理字幕")
-            subtitle_prepared_in_this_round = False
+        any_success = False
+        for platform in pending:
+            task = get_task(task_id)  # 每轮刷新
+            if not task:
+                return
+            if platform not in _registry_pending(task, targets):
+                continue  # 本轮已被其它路径写入结果
+            try:
+                if platform == 'acfun':
+                    self._upload_to_acfun(task_id, task_logger, subtitle_prepared=subtitle_prepared)
+                    subtitle_prepared = True
+                elif platform == 'bilibili':
+                    self._upload_to_bilibili(task_id, task_logger, subtitle_prepared=subtitle_prepared)
+                    subtitle_prepared = True
+                else:
+                    self._upload_to_sau_platform(task_id, task_logger, platform, subtitle_prepared=subtitle_prepared)
+                    subtitle_prepared = True
+            except Exception as e:
+                import traceback
+                task_logger.error(f"平台 {platform} 上传异常: {e}\n{traceback.format_exc()}")
 
-            # 双平台投稿：按 AcFun -> bilibili 顺序执行，且对已成功的平台幂等跳过
-            if UPLOAD_TARGET_ACFUN in pending_platforms:
-                self._upload_to_acfun(task_id, task_logger, subtitle_prepared=False)
-                subtitle_prepared_in_this_round = True
-                task = get_task(task_id)
-                if not task or task.get('status') == TASK_STATES['FAILED']:
-                    return
-            else:
-                task_logger.info("检测到已有 AcFun 上传结果，跳过 AcFun 上传")
+            # 用实际响应判定该平台是否成功(不能只看"调用返回")
+            task = get_task(task_id)
+            if task and _task_has_platform_upload_response(task, platform):
+                any_success = True
 
-            if UPLOAD_TARGET_BILIBILI in pending_platforms:
-                self._upload_to_bilibili(
-                    task_id,
-                    task_logger,
-                    subtitle_prepared=subtitle_prepared_in_this_round
-                )
-            else:
-                task_logger.info("检测到已有 bilibili 上传结果，跳过 bilibili 上传")
-            return
-
-        if upload_target == UPLOAD_TARGET_BILIBILI:
-            if UPLOAD_TARGET_BILIBILI in pending_platforms:
-                self._upload_to_bilibili(task_id, task_logger)
-            else:
-                task_logger.info("检测到已有 bilibili 上传结果，跳过 bilibili 上传")
-            return
-
-        if UPLOAD_TARGET_ACFUN in pending_platforms:
-            self._upload_to_acfun(task_id, task_logger)
-        else:
-            task_logger.info("检测到已有 AcFun 上传结果，跳过 AcFun 上传")
+        # 所有平台尝试完毕:至少一个真实成功才 COMPLETED,否则保持 FAILED(由各平台方法已设置)
+        task = get_task(task_id)
+        if task and any_success and task.get('status') != TASK_STATES['COMPLETED']:
+            update_task(task_id, status=TASK_STATES['COMPLETED'],
+                        error_message=None, upload_progress=None)
 
     def _ensure_force_upload_metadata_ready(self, task_id, task_logger):
         """强制上传前继续未完成的 AI 处理阶段。"""
@@ -7857,6 +7949,87 @@ class TaskProcessor:
                 status=TASK_STATES['FAILED'],
                 error_message=f"上传异常: {str(e)}"
             )
+
+    def _upload_to_sau_platform(self, task_id, task_logger, platform, subtitle_prepared=False):
+        """通过 social-auto-upload 上传到指定 sau 平台(带并发控制)。"""
+        from modules.platform_registry import sau_name_for
+        from modules.sau_uploader import SauPlatformUploader
+
+        account = str(self.config.get(f'SAU_ACCOUNT_{platform.upper()}', '') or '').strip()
+        sau_bin = str(self.config.get('SAU_BIN', '') or '').strip()
+        timeout = int(self.config.get('SAU_UPLOAD_TIMEOUT_SECONDS', 1800) or 1800)
+
+        if not account:
+            task_logger.error(f"未配置 {platform} 的 sau 账号(SAU_ACCOUNT_{platform.upper()})")
+            update_task(task_id, status=TASK_STATES['FAILED'],
+                        error_message=f"未配置 {platform} 账号")
+            return
+
+        task = get_task(task_id)
+        if not task:
+            task_logger.error("任务不存在")
+            return
+
+        update_task(task_id, status=TASK_STATES['UPLOADING'])
+
+        video_path = task.get('video_path_local', '')
+        cover_path = self._recover_cover_path(task_id, task.get('cover_path_local', ''), task_logger)
+        title = (task.get('video_title_translated') or task.get('video_title_original') or '')
+        description = (task.get('description_translated') or task.get('description_original') or '')
+        tags = _normalize_tags_list(task.get('tags_generated'))
+        youtube_url = task.get('youtube_url', '')
+
+        # 视频缺失则先下载(与原生路径一致)
+        if not video_path or not os.path.exists(video_path):
+            self._download_video_file(task_id, youtube_url, task_logger)
+            task = get_task(task_id)
+            video_path = task.get('video_path_local', '') if task else ''
+
+        # 字幕预处理(与原生路径一致:首次上传前做一次)
+        if not subtitle_prepared:
+            task = self._prepare_subtitle_for_upload(task_id, task_logger) or task
+            video_path = task.get('video_path_local', '') if task else video_path
+
+        if not video_path or not os.path.exists(video_path):
+            update_task(task_id, status=TASK_STATES['FAILED'], error_message="视频文件缺失")
+            return
+
+        global upload_semaphore
+        if upload_semaphore is None:
+            init_upload_semaphore(1)
+        if upload_semaphore is None:
+            task_logger.error("upload_semaphore 初始化失败,无法上传")
+            update_task(task_id, status=TASK_STATES['FAILED'], error_message="上传锁初始化失败")
+            return
+
+        try:
+            with upload_semaphore:
+                task_logger.info(f"获得上传锁,开始通过 sau 上传到 {platform}")
+                uploader = SauPlatformUploader(sau_bin=sau_bin)
+                uploader.logger = task_logger
+                def _cb(text):
+                    task_logger.info(f"[sau/{platform}] {text}")
+                ok, result = uploader.upload_video(
+                    video_file_path=video_path, cover_file_path=cover_path,
+                    title=title, description=description, tags=tags,
+                    platform=sau_name_for(platform), account=account,
+                    youtube_url=youtube_url, task_id=task_id,
+                    progress_callback=_cb, timeout=timeout,
+                )
+        except Exception as e:
+            import traceback
+            task_logger.error(f"sau 上传 {platform} 异常: {e}\n{traceback.format_exc()}")
+            update_task(task_id, status=TASK_STATES['FAILED'],
+                        error_message=f"{platform} 上传异常: {e}")
+            return
+
+        if ok:
+            _record_sau_upload_response(task_id, platform, result)
+            task_logger.info(f"{platform} 上传成功: {result}")
+        else:
+            task_logger.error(f"{platform} 上传失败: {result}")
+            update_task(task_id, status=TASK_STATES['FAILED'],
+                        error_message=f"{platform} 上传失败: {result}")
 
     def _do_upload_to_bilibili(self, task_id, task_logger, subtitle_prepared=False):
         """实际执行上传到 Bilibili 的逻辑"""

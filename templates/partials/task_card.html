@@ -293,6 +293,9 @@
             {% else %}
                 <span class="badge bg-secondary">未上传</span>
             {% endif %}
+            {% for plat, resp in (task.sau_upload_responses_dict or {}).items() %}
+                <span class="badge bg-success">{{ plat }}: 已上传</span>
+            {% endfor %}
         </div>
 
         <div class="task-actions mt-3 d-grid gap-2 task-actions-grid-2">

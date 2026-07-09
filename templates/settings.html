@@ -254,6 +254,28 @@
                                                             </select>
                                                         </div>
                                                     </div>
+                                                    <div class="col-12">
+                                                        <label class="form-label">投稿目标平台（可多选）</label>
+                                                        <div id="upload-targets-group" class="d-flex flex-wrap gap-2">
+                                                            {% for key, info in platform_registry.items() %}
+                                                            <div class="form-check">
+                                                                <input class="form-check-input upload-target-chk" type="checkbox"
+                                                                       name="upload_targets" value="{{ key }}" id="ut_{{ key }}"
+                                                                       {% if key in (config.UPLOAD_TARGETS or ['acfun']) %}checked{% endif %}>
+                                                                <label class="form-check-label" for="ut_{{ key }}">
+                                                                    {{ key }}
+                                                                    {% if info.kind == 'sau' %}
+                                                                        <input class="form-control form-control-sm d-inline-block w-auto ms-2"
+                                                                               name="SAU_ACCOUNT_{{ key.upper() }}" placeholder="sau 账号名(--account)"
+                                                                               value="{{ config['SAU_ACCOUNT_' ~ key.upper()] }}">
+                                                                    {% endif %}
+                                                                </label>
+                                                            </div>
+                                                            {% endfor %}
+                                                        </div>
+                                                        <small class="text-muted">sau 平台需先在终端 <code>&lt;SAU_BIN&gt; &lt;平台&gt; login --account &lt;账号名&gt;</code> 登录；勾选后保存即可生效，新建任务将默认上传到这些平台。</small>
+                                                        <div id="sau-health" class="mt-2"><span class="badge bg-secondary">sau 检查中…</span></div>
+                                                    </div>
                                                 </div>
                                                 <div class="mt-3">
                                                     <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#advancedOverviewPublishing" aria-expanded="false" aria-controls="advancedOverviewPublishing">
