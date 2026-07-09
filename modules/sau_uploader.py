@@ -44,11 +44,11 @@ class SauPlatformUploader:
                "--file", video_file_path,
                "--title", str(title),
                "--desc", str(description or ""),
-               "--cover", cover_file_path]
-        for t in (tags or []):
-            s = str(t).strip()
-            if s:
-                cmd.extend(["--tag", s])
+               "--thumbnail", cover_file_path]
+        # sau 的 --tags 是单个逗号分隔字符串(不是多次 --tag)
+        tag_str = ",".join(str(t).strip() for t in (tags or []) if str(t).strip())
+        if tag_str:
+            cmd.extend(["--tags", tag_str])
 
         self._log(f"调用 sau: {' '.join(cmd)}")
         try:
@@ -80,10 +80,15 @@ class SauPlatformUploader:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
             return False, f"sau 上传超时({timeout}s)"
         except Exception as e:
             proc.kill()
+            proc.wait()
             return False, f"sau 子进程异常: {e}"
+        finally:
+            if proc.stdout:
+                proc.stdout.close()
 
         if proc.returncode != 0:
             summary = "\n".join(tail[-8:])
