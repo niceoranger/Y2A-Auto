@@ -2744,11 +2744,14 @@ def sau_health_check():
     if not os.path.isfile(sau_bin):
         return jsonify({'ok': False, 'message': f'sau 路径无效: {sau_bin}'})
     try:
-        proc = subprocess.run([sau_bin, '--version'], capture_output=True,
+        # sau CLI 不支持 --version;用 -h 验证可加载(需成功 import conf/sau_cli 才会打印帮助)
+        proc = subprocess.run([sau_bin, '-h'], capture_output=True,
                               text=True, timeout=10)
-        ok = (proc.returncode == 0)
-        return jsonify({'ok': ok,
-                        'message': proc.stdout.strip() or proc.stderr.strip() or ('ok' if ok else '失败')})
+        ok = (proc.returncode == 0 and 'usage: sau' in (proc.stdout or ''))
+        if ok:
+            return jsonify({'ok': True, 'message': 'sau 可用'})
+        return jsonify({'ok': False,
+                        'message': (proc.stderr.strip() or proc.stdout.strip() or '失败')[:300]})
     except Exception as e:
         return jsonify({'ok': False, 'message': f'sau 调用失败: {e}'})
 
