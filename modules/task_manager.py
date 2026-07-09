@@ -487,15 +487,6 @@ def _task_has_upload_response(task, upload_target=None):
     return bool(task.get('acfun_upload_response'))
 
 
-def _task_has_platform_upload_response(task, platform):
-    if not task:
-        return False
-    p = normalize_upload_target(platform)
-    if p == UPLOAD_TARGET_BILIBILI:
-        return bool(task.get('bilibili_upload_response'))
-    return bool(task.get('acfun_upload_response'))
-
-
 def _build_task_notification_payload(task, overrides=None) -> dict:
     merged_task = dict(task or {})
     if overrides:
