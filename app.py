@@ -22,6 +22,7 @@ from modules.utils import get_app_subdir
 from modules.config_manager import load_config, update_config, reset_specific_config
 from modules.whisper_languages import WHISPER_LANGUAGE_LIST
 from modules.task_manager import add_task, start_task, get_task, get_tasks_paginated, get_tasks_by_status, update_task, delete_task, force_upload_task, TASK_STATES, clear_all_tasks, retry_failed_tasks, register_task_updates_listener, unregister_task_updates_listener, resolve_cookie_file_path
+from modules.platform_registry import PLATFORMS, sau_platforms
 from modules.acfun_auth import AcfunQrLoginSession
 from modules.bilibili_auth import BilibiliQrLoginSession
 from queue import Empty
@@ -1882,7 +1883,16 @@ def add_task_via_extension():
         config = load_config()
         if not upload_target:
             upload_target = config.get('UPLOAD_TARGET_DEFAULT', 'acfun')
-        
+
+        upload_targets = None
+        try:
+            if data is not None:
+                upload_targets = data.get('upload_targets')
+        except Exception:
+            upload_targets = None
+        if not upload_targets:
+            upload_targets = request.form.get('upload_targets') or None
+
         # 判断是否为播放列表URL
         if 'youtube.com/playlist' in youtube_url or 'youtu.be/playlist' in youtube_url:
             # 提取所有视频URL
@@ -1890,18 +1900,18 @@ def add_task_via_extension():
             video_urls = extract_video_urls_from_playlist(youtube_url, cookies_path)
             if not video_urls:
                 return jsonify({'success': False, 'message': '未能提取到播放列表中的视频'}), 400
-            
+
             added_count = 0
             task_ids = []
             for url in video_urls:
-                task_id = add_task(url, upload_target=upload_target)
+                task_id = add_task(url, upload_target=upload_target, upload_targets=upload_targets)
                 if task_id:
                     added_count += 1
                     task_ids.append(task_id)
                     # 自动模式下启动任务
                     if config.get('AUTO_MODE_ENABLED', False):
                         start_task(task_id, config)
-            
+
             return jsonify({
                 'success': True,
                 'message': f'已批量添加 {added_count} 个视频任务（来自播放列表）',
@@ -1910,7 +1920,7 @@ def add_task_via_extension():
             }), 200
         else:
             # 单个视频
-            task_id = add_task(youtube_url, upload_target=upload_target)
+            task_id = add_task(youtube_url, upload_target=upload_target, upload_targets=upload_targets)
             if task_id:
                 if config.get('AUTO_MODE_ENABLED', False):
                     logger.info(f"自动模式已启用，立即开始处理任务 {task_id}")
@@ -1948,6 +1958,8 @@ def add_task_route():
     if not upload_target:
         upload_target = config.get('UPLOAD_TARGET_DEFAULT', 'acfun')
 
+    upload_targets = request.form.get('upload_targets') or None
+
     # 判断是否为播放列表URL
     if 'youtube.com/playlist' in youtube_url or 'youtu.be/playlist' in youtube_url:
         # 提取所有视频URL
@@ -1958,13 +1970,13 @@ def add_task_route():
             return redirect(url_for('tasks'))
         added_count = 0
         for url in video_urls:
-            task_id = add_task(url, upload_target=upload_target)
+            task_id = add_task(url, upload_target=upload_target, upload_targets=upload_targets)
             if task_id:
                 added_count += 1
         flash(f'已批量添加 {added_count} 个视频任务（来自播放列表）', 'success')
         return redirect(url_for('tasks'))
     else:
-        task_id = add_task(youtube_url, upload_target=upload_target)
+        task_id = add_task(youtube_url, upload_target=upload_target, upload_targets=upload_targets)
         if task_id:
             if config.get('AUTO_MODE_ENABLED', False):
                 logger.info(f"自动模式已启用，立即开始处理任务 {task_id}")
@@ -2584,6 +2596,8 @@ def settings():
         acfun_partition_mapping=acfun_partition_mapping,
         bilibili_partition_mapping=bilibili_partition_mapping,
         builtin_prompts=builtin_prompts,
+        platform_registry=PLATFORMS,
+        sau_platforms=sau_platforms(),
     )
 
 
@@ -2694,6 +2708,26 @@ def settings_test_cookiecloud():
             'updated_at': updated_at,
             'status': 'error',
         }), 500
+
+
+@app.route('/settings/sau/health', methods=['GET'])
+def sau_health_check():
+    import subprocess
+    from modules.config_manager import load_config
+    cfg = load_config()
+    sau_bin = str(cfg.get('SAU_BIN', '') or '').strip()
+    if not sau_bin:
+        return jsonify({'ok': False, 'message': '未配置 SAU_BIN'})
+    if not os.path.isfile(sau_bin):
+        return jsonify({'ok': False, 'message': f'sau 路径无效: {sau_bin}'})
+    try:
+        proc = subprocess.run([sau_bin, '--version'], capture_output=True,
+                              text=True, timeout=10)
+        ok = (proc.returncode == 0)
+        return jsonify({'ok': ok,
+                        'message': proc.stdout.strip() or proc.stderr.strip() or ('ok' if ok else '失败')})
+    except Exception as e:
+        return jsonify({'ok': False, 'message': f'sau 调用失败: {e}'})
 
 
 @app.route('/settings/cookiecloud/sync', methods=['POST'])
