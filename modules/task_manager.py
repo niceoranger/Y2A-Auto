@@ -1346,32 +1346,47 @@ def get_db_connection():
         logger.debug(f"设置SQLite连接参数失败，将使用默认参数: {e}")
     return conn
 
-def add_task(youtube_url, upload_target=None):
+def add_task(youtube_url, upload_target=None, upload_targets=None):
     """
     添加新任务到数据库
-    
+
     Args:
         youtube_url: YouTube视频URL
-        upload_target: 投稿平台(acfun|bilibili|both)，为空则使用配置默认值
-        
+        upload_target: 投稿平台(acfun|bilibili|both)，旧的单选枚举，为空则使用配置默认值
+        upload_targets: 投稿平台多选列表(如 ['bilibili','douyin'])，优先于此处的 upload_target
+
     Returns:
         task_id: 新创建的任务ID
     """
     task_id = str(uuid.uuid4())
-    normalized_target = normalize_upload_target(upload_target)
     conn = get_db_connection()
-    
+
     try:
-        if not upload_target:
+        # 多选列表优先;其次旧枚举;最后配置默认 UPLOAD_TARGETS
+        from modules.platform_registry import normalize_upload_targets as _norm_targets, migrate_legacy_upload_target as _migrate_legacy
+        targets = _norm_targets(upload_targets)
+        if not targets:
+            targets = _migrate_legacy(upload_target) or []
+        if not targets:
             try:
                 from modules.config_manager import load_config
                 cfg = load_config()
-                normalized_target = normalize_upload_target(cfg.get('UPLOAD_TARGET_DEFAULT', UPLOAD_TARGET_ACFUN))
+                targets = _norm_targets(cfg.get('UPLOAD_TARGETS')) or ['acfun']
             except Exception:
-                normalized_target = UPLOAD_TARGET_ACFUN
+                targets = ['acfun']
+
+        # 旧列保留(单枚举,向后兼容),新列写 JSON 列表
+        legacy_for_old_col = upload_target or (
+            'both' if len(targets) > 1 else (targets[0] if targets else 'acfun')
+        )
+        if legacy_for_old_col not in ('acfun', 'bilibili', 'both'):
+            legacy_for_old_col = 'acfun'
+        normalized_target = legacy_for_old_col
         conn.execute(
-            'INSERT INTO tasks (id, youtube_url, upload_target, status) VALUES (?, ?, ?, ?)',
-            (task_id, youtube_url, normalized_target, TASK_STATES['PENDING'])
+            'INSERT INTO tasks (id, youtube_url, upload_target, upload_targets, status) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (task_id, youtube_url, normalized_target,
+             json.dumps(targets, ensure_ascii=False), TASK_STATES['PENDING'])
         )
         conn.commit()
         logger.info(f"新任务添加成功, ID: {task_id}, URL: {youtube_url}, 平台: {normalized_target}")
