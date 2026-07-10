@@ -76,6 +76,15 @@ DEFAULT_CONFIG = {
     "ACFUN_USERNAME": "",
     "ACFUN_PASSWORD": "",
     "UPLOAD_TARGET_DEFAULT": "acfun",  # [已废弃,仅向后兼容] 旧单枚举:acfun|bilibili|both
+    # AI 重制管线(Phase 3)——WhisperX ASR 子系统
+    "REMASTER_PIPELINE_ENABLED": False,  # 重制管线总开关,默认关
+    "WHISPERX_ASR_PYTHON": "/Users/mac/asr-venv/bin/python",  # runner 解释器(独立 venv)
+    "WHISPERX_RUNNER": "modules/whisperx_runner.py",          # runner 脚本(相对项目根)
+    "WHISPERX_MODEL_NAME": "large-v3",       # ASR 模型(质量优先)
+    "WHISPERX_DEVICE": "cpu",                # Apple Silicon 走 CPU(CTranslate2 不支持 MPS)
+    "WHISPERX_COMPUTE_TYPE": "int8",         # CPU 量化
+    "WHISPERX_BATCH_SIZE": 16,               # 转写/对齐 batch
+    "WHISPERX_TIMEOUT_SECONDS": 7200,        # 长视频 CPU 跑慢,超时 2h
     # 多选投稿平台列表(新):如 ["bilibili","douyin"]。空列表视为 ["acfun"]
     "UPLOAD_TARGETS": ["acfun"],
     # social-auto-upload 集成
