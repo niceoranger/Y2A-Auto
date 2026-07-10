@@ -132,6 +132,9 @@ class TranslationConfig:
     prompt_text: str = ""         # 字幕翻译主 Prompt 用户文本
     prompt_strict_mode: str = "builtin"  # 字幕翻译严格补救 Prompt 模式
     prompt_strict_text: str = ""  # 字幕翻译严格补救 Prompt 用户文本
+    # 术语一致性 RAG
+    glossary_rag_enabled: bool = False
+    glossary_max_terms: int = 50
 
 class SubtitleReader:
     """字幕文件读取器"""
@@ -618,6 +621,8 @@ class SubtitleTranslator:
         }
         
         self.llm_requester = LLMRequester(self.openai_config, task_id)
+        from .glossary_store import GlossaryStore
+        self.glossary_store = GlossaryStore({})
         self.reader = SubtitleReader()
         self.writer = SubtitleWriter()
 
@@ -738,6 +743,31 @@ class SubtitleTranslator:
                             cancel_event=None) -> bool:
         """使用多线程并发翻译"""
         try:
+            # 术语一致性 RAG：翻译前抽全片术语表（失败退化空表，不中断）
+            if getattr(self.config, 'glossary_rag_enabled', False):
+                try:
+                    from .glossary_extractor import GlossaryExtractor
+                    from .glossary_store import GlossaryStore
+                    all_src = [it.source_text for it in items if it.source_text]
+                    extractor = GlossaryExtractor(
+                        dict(self.openai_config),
+                        task_id=self.task_id,
+                        max_terms=getattr(self.config, 'glossary_max_terms', 50),
+                    )
+                    terms = extractor.extract(all_src, target_language=self.config.target_language)
+                    self.glossary_store = GlossaryStore(terms)
+                    self.logger.info(f"术语表抽取完成，命中 {len(self.glossary_store)} 条术语")
+                    # 持久化到任务目录（每任务独立）
+                    try:
+                        import os as _os
+                        task_dir = _os.path.join("downloads", str(self.task_id))
+                        if _os.path.isdir(task_dir) and len(self.glossary_store) > 0:
+                            self.glossary_store.save(_os.path.join(task_dir, "glossary.json"))
+                    except Exception as _se:
+                        self.logger.debug(f"术语表持久化跳过: {_se}")
+                except Exception as e:
+                    self.logger.warning(f"术语表抽取异常，退化为普通翻译: {e}")
+
             total_items = len(items)
             batch_size = self.config.batch_size
             # 允许不设上限：当配置为0或小于1时，按需要的批次数动态分配
@@ -798,15 +828,20 @@ class SubtitleTranslator:
                 batch_items = batch_info['items']
                 batch_texts = batch_info['texts']
                 
+                # 术语一致性 RAG：为当前批次匹配术语
+                matched = self.glossary_store.match(batch_texts)
+                glossary_text = self.glossary_store.format_for_prompt(matched)
+
                 # 翻译当前批次，带重试机制
                 for retry in range(self.config.max_retries):
                     try:
                         if cancel_event is not None and cancel_event.is_set():
                             return False
                         translations = self.llm_requester.translate_batch(
-                            batch_texts, 
+                            batch_texts,
                             self.config.target_language,
-                            batch_id=batch_id
+                            batch_id=batch_id,
+                            glossary_text=glossary_text,
                         )
                         
                         # 将翻译结果赋值给字幕项
@@ -1171,6 +1206,8 @@ def create_translator_from_config(app_config: Dict, task_id: Optional[str] = Non
             prompt_text=prompt_text,
             prompt_strict_mode=prompt_strict_mode,
             prompt_strict_text=prompt_strict_text,
+            glossary_rag_enabled=bool(app_config.get('GLOSSARY_RAG_ENABLED', False)),
+            glossary_max_terms=int(app_config.get('GLOSSARY_MAX_TERMS', 50) or 50),
         )
         
         if not translation_config.api_key:
