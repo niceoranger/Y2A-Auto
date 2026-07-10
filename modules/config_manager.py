@@ -111,6 +111,12 @@ DEFAULT_CONFIG = {
     "SUBTITLE_OPENAI_API_KEY": "",
     "SUBTITLE_OPENAI_MODEL_NAME": "",
     "SUBTITLE_OPENAI_THINKING_ENABLED": False,
+    # 术语一致性 RAG 翻译（默认关；开启则翻译前抽全片术语表并注入每批 prompt）
+    "GLOSSARY_RAG_ENABLED": False,
+    "GLOSSARY_MAX_TERMS": 50,                # 术语表上限，长纪录片/播客可调高
+    "GLOSSARY_OPENAI_BASE_URL": "",          # 留空回退 SUBTITLE_OPENAI_BASE_URL / OPENAI_BASE_URL
+    "GLOSSARY_OPENAI_API_KEY": "",           # 留空回退 SUBTITLE_OPENAI_API_KEY / OPENAI_API_KEY
+    "GLOSSARY_OPENAI_MODEL_NAME": "",        # 留空回退 SUBTITLE_OPENAI_MODEL_NAME / OPENAI_MODEL_NAME
     "YOUTUBE_API_KEY": "",
     "YOUTUBE_API_PROXY_ENABLED": False,  # 是否为 YouTube Data API 监控启用独立代理
     "YOUTUBE_API_PROXY_URL": "",  # 监控 API 代理地址，格式：http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
