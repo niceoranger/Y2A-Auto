@@ -70,12 +70,19 @@ class GlossaryExtractor:
             return {}
         if not isinstance(data, dict) or "terms" not in data:
             return {}
+        terms = data.get("terms", [])
+        if not isinstance(terms, list):
+            return {}
         out: Dict[str, str] = {}
-        for item in data.get("terms", []):
+        for item in terms:
             if not isinstance(item, dict):
                 continue
-            src = str(item.get("source", "")).strip()
-            tgt = str(item.get("target", "")).strip()
+            src_raw = item.get("source")
+            tgt_raw = item.get("target")
+            if not isinstance(src_raw, str) or not isinstance(tgt_raw, str):
+                continue
+            src = src_raw.strip()
+            tgt = tgt_raw.strip()
             if src and tgt:
                 out[src] = tgt
             if len(out) >= self.max_terms:
