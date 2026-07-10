@@ -132,6 +132,9 @@ class TranslationConfig:
     prompt_text: str = ""         # 字幕翻译主 Prompt 用户文本
     prompt_strict_mode: str = "builtin"  # 字幕翻译严格补救 Prompt 模式
     prompt_strict_text: str = ""  # 字幕翻译严格补救 Prompt 用户文本
+    # 术语一致性 RAG
+    glossary_rag_enabled: bool = False
+    glossary_max_terms: int = 50
 
 class SubtitleReader:
     """字幕文件读取器"""
@@ -383,18 +386,18 @@ class LLMRequester:
         except Exception as e:
             self.logger.error(f"初始化OpenAI客户端失败: {e}")
     
-    def translate_batch(self, texts: List[str], target_language: str, batch_id: str = "") -> List[str]:
+    def translate_batch(self, texts: List[str], target_language: str, batch_id: str = "", glossary_text: str = "") -> List[str]:
         """批量翻译文本，使用结构化JSON输出"""
         if not texts:
             return []
         if not self.client:
             raise RuntimeError("OpenAI客户端未初始化")
-        
+
         try:
             self._batch_counter += 1
             log_as_info = self._should_log_batch(batch_id)
             # 构建翻译提示词
-            system_prompt = self._build_structured_system_prompt(target_language)
+            system_prompt = self._build_structured_system_prompt(target_language, glossary_text)
             user_prompt = self._build_structured_user_prompt(texts)
             
             model_name = self.openai_config.get('OPENAI_MODEL_NAME', 'gpt-3.5-turbo')
@@ -459,14 +462,14 @@ class LLMRequester:
         except Exception:
             return True
 
-    def translate_batch_strict(self, texts: List[str], target_language: str, batch_id: str = "") -> List[str]:
+    def translate_batch_strict(self, texts: List[str], target_language: str, batch_id: str = "", glossary_text: str = "") -> List[str]:
         """严格模式批量翻译：用于补救仍未译的条目，强制全中文输出。"""
         if not texts:
             return []
         if not self.client:
             raise RuntimeError("OpenAI客户端未初始化")
         try:
-            system_prompt = self._build_strict_structured_system_prompt(target_language)
+            system_prompt = self._build_strict_structured_system_prompt(target_language, glossary_text)
             user_prompt = self._build_structured_user_prompt(texts)
             model_name = self.openai_config.get('OPENAI_MODEL_NAME', 'gpt-3.5-turbo')
             with self._log_lock:
@@ -500,16 +503,17 @@ class LLMRequester:
                 self.logger.error(f"严格模式批次 {batch_id} 翻译失败: {e}")
             raise
     
-    def _build_structured_system_prompt(self, target_language: str) -> str:
+    def _build_structured_system_prompt(self, target_language: str, glossary_text: str = "") -> str:
         """构建结构化系统提示词（委托给统一 Prompt 中心）。"""
         from .prompt_manager import get_subtitle_system_prompt
         return get_subtitle_system_prompt(
             mode=self.openai_config.get('PROMPT_MODE', 'builtin'),
             user_text=self.openai_config.get('PROMPT_TEXT', ''),
             target_language=target_language,
+            glossary_text=glossary_text,
         )
 
-    def _build_strict_structured_system_prompt(self, target_language: str) -> str:
+    def _build_strict_structured_system_prompt(self, target_language: str, glossary_text: str = "") -> str:
         """严格模式提示词（委托给统一 Prompt 中心）。"""
         from .prompt_manager import get_subtitle_strict_system_prompt
         return get_subtitle_strict_system_prompt(
@@ -519,6 +523,7 @@ class LLMRequester:
             ),
             user_text=self.openai_config.get('PROMPT_STRICT_TEXT', ''),
             target_language=target_language,
+            glossary_text=glossary_text,
         )
     
     def _build_structured_user_prompt(self, texts: List[str]) -> str:
@@ -616,6 +621,8 @@ class SubtitleTranslator:
         }
         
         self.llm_requester = LLMRequester(self.openai_config, task_id)
+        from .glossary_store import GlossaryStore
+        self.glossary_store = GlossaryStore({})
         self.reader = SubtitleReader()
         self.writer = SubtitleWriter()
 
@@ -736,6 +743,29 @@ class SubtitleTranslator:
                             cancel_event=None) -> bool:
         """使用多线程并发翻译"""
         try:
+            # 术语一致性 RAG：翻译前抽全片术语表（失败退化空表，不中断）
+            if getattr(self.config, 'glossary_rag_enabled', False):
+                try:
+                    from .glossary_extractor import GlossaryExtractor
+                    from .glossary_store import GlossaryStore
+                    all_src = [it.source_text for it in items if it.source_text]
+                    extractor = GlossaryExtractor(
+                        dict(self.openai_config),
+                        task_id=self.task_id,
+                        max_terms=getattr(self.config, 'glossary_max_terms', 50),
+                    )
+                    terms = extractor.extract(all_src, target_language=self.config.target_language)
+                    self.glossary_store = GlossaryStore(terms)
+                    self.logger.info(f"术语表抽取完成，命中 {len(self.glossary_store)} 条术语")
+                    # 持久化到任务目录（每任务独立；save() 自身 makedirs，无需预判目录）
+                    if len(self.glossary_store) > 0:
+                        try:
+                            self.glossary_store.save(os.path.join("downloads", str(self.task_id), "glossary.json"))
+                        except Exception as _se:
+                            self.logger.debug(f"术语表持久化跳过: {_se}")
+                except Exception as e:
+                    self.logger.warning(f"术语表抽取异常，退化为普通翻译: {e}")
+
             total_items = len(items)
             batch_size = self.config.batch_size
             # 允许不设上限：当配置为0或小于1时，按需要的批次数动态分配
@@ -796,15 +826,20 @@ class SubtitleTranslator:
                 batch_items = batch_info['items']
                 batch_texts = batch_info['texts']
                 
+                # 术语一致性 RAG：为当前批次匹配术语
+                matched = self.glossary_store.match(batch_texts)
+                glossary_text = self.glossary_store.format_for_prompt(matched)
+
                 # 翻译当前批次，带重试机制
                 for retry in range(self.config.max_retries):
                     try:
                         if cancel_event is not None and cancel_event.is_set():
                             return False
                         translations = self.llm_requester.translate_batch(
-                            batch_texts, 
+                            batch_texts,
                             self.config.target_language,
-                            batch_id=batch_id
+                            batch_id=batch_id,
+                            glossary_text=glossary_text,
                         )
                         
                         # 将翻译结果赋值给字幕项
@@ -1169,6 +1204,8 @@ def create_translator_from_config(app_config: Dict, task_id: Optional[str] = Non
             prompt_text=prompt_text,
             prompt_strict_mode=prompt_strict_mode,
             prompt_strict_text=prompt_strict_text,
+            glossary_rag_enabled=bool(app_config.get('GLOSSARY_RAG_ENABLED', False)),
+            glossary_max_terms=int(app_config.get('GLOSSARY_MAX_TERMS', 50) or 50),
         )
         
         if not translation_config.api_key:
