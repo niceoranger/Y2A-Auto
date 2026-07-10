@@ -12,9 +12,6 @@ class TestGlossaryConfig(unittest.TestCase):
         self.assertIn("GLOSSARY_RAG_ENABLED", DEFAULT_CONFIG)
         self.assertFalse(DEFAULT_CONFIG["GLOSSARY_RAG_ENABLED"])
         self.assertEqual(DEFAULT_CONFIG["GLOSSARY_MAX_TERMS"], 50)
-        self.assertEqual(DEFAULT_CONFIG["GLOSSARY_OPENAI_BASE_URL"], "")
-        self.assertEqual(DEFAULT_CONFIG["GLOSSARY_OPENAI_API_KEY"], "")
-        self.assertEqual(DEFAULT_CONFIG["GLOSSARY_OPENAI_MODEL_NAME"], "")
 
 
 if __name__ == "__main__":

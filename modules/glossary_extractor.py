@@ -37,11 +37,7 @@ class GlossaryExtractor:
             joined = "\n".join(t for t in source_texts if t)
             if not joined.strip():
                 return {}
-            model_name = (
-                self.openai_config.get("GLOSSARY_OPENAI_MODEL_NAME")
-                or self.openai_config.get("SUBTITLE_OPENAI_MODEL_NAME")
-                or self.openai_config.get("OPENAI_MODEL_NAME", "gpt-3.5-turbo")
-            )
+            model_name = self.openai_config.get("OPENAI_MODEL_NAME", "gpt-3.5-turbo")
             user_prompt = json.dumps(
                 {"target_language": target_language, "subtitles": joined},
                 ensure_ascii=False,
