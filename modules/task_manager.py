@@ -3074,7 +3074,7 @@ class TaskProcessor:
         out_srt = os.path.join(task_dir, f"asr_whisperx_{task_id}.srt")
 
         prev_status = task.get('status')
-        update_task(task_id, status=TASK_STATES.get('ASR_TRANSCRIBING', TASK_STATES['PROCESSING']))
+        update_task(task_id, status=TASK_STATES['ASR_TRANSCRIBING'])
         task_logger.info(f"重制管线:调用 WhisperX({self.config.get('WHISPERX_MODEL_NAME', 'large-v3')}/{self.config.get('WHISPERX_DEVICE', 'cpu')}),输出 {out_srt}")
 
         asr = WhisperXAsr(python_bin=python_bin, runner_path=runner_path)
@@ -3091,10 +3091,11 @@ class TaskProcessor:
             timeout=_as_int(self.config.get('WHISPERX_TIMEOUT_SECONDS', 7200), 7200, minimum=60),
         )
         if ok:
-            update_task(task_id, subtitle_path_original=out_srt,
-                        subtitle_language_detected=None, asr_warning_message=None,
-                        status=prev_status)
-            task_logger.info(f"重制 ASR 完成: {res}")
+            # 本子项目只产中间产物(word-level SRT 落盘在 out_srt),不写 subtitle_path_original,
+            # 以免被下游 _translate_subtitle 拾取烧进上传视频 / 被 _infer_completed_stages 误判翻译已完成。
+            # 后续翻译/合成子项目再刻意接入这份 SRT。见 spec §8。
+            update_task(task_id, asr_warning_message=None, status=prev_status)
+            task_logger.info(f"重制 ASR 完成(word-level SRT: {out_srt}): {res}")
             return True
         task_logger.error(f"重制 ASR 失败: {res}")
         update_task(task_id, asr_warning_message=f"whisperx: {res}", status=prev_status)
