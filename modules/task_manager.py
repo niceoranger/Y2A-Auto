@@ -3079,7 +3079,7 @@ class TaskProcessor:
         asr = WhisperXAsr(python_bin=python_bin, runner_path=runner_path)
         asr.logger = task_logger
         ok, res = asr.transcribe(
-            video_file_path=video_path, output_srt_path=out_srt,
+            video_path=video_path, output_srt_path=out_srt,
             language=str(self.config.get('SUBTITLE_SOURCE_LANGUAGE', 'auto') or 'auto'),
             model=str(self.config.get('WHISPERX_MODEL_NAME', 'large-v3') or 'large-v3'),
             device=str(self.config.get('WHISPERX_DEVICE', 'cpu') or 'cpu'),
