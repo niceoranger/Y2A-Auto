@@ -380,6 +380,7 @@ PIPELINE_STAGE_GENERATE_TAGS = 'generate_tags'
 PIPELINE_STAGE_RECOMMEND_PARTITION = 'recommend_partition'
 PIPELINE_STAGE_MODERATE_CONTENT = 'moderate_content'
 PIPELINE_STAGE_DOWNLOAD_VIDEO = 'download_video'
+PIPELINE_STAGE_REMASTER_ASR = 'remaster_asr'
 PIPELINE_STAGE_TRANSLATE_SUBTITLE = 'translate_subtitle'
 PIPELINE_STAGE_UPLOAD_TO_ACFUN = 'upload_to_acfun'
 
@@ -390,6 +391,7 @@ PIPELINE_STAGE_ORDER = [
     PIPELINE_STAGE_RECOMMEND_PARTITION,
     PIPELINE_STAGE_MODERATE_CONTENT,
     PIPELINE_STAGE_DOWNLOAD_VIDEO,
+    PIPELINE_STAGE_REMASTER_ASR,
     PIPELINE_STAGE_TRANSLATE_SUBTITLE,
     PIPELINE_STAGE_UPLOAD_TO_ACFUN,
 ]
@@ -2450,6 +2452,15 @@ class TaskProcessor:
                     return
                 completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_DOWNLOAD_VIDEO)
 
+            if PIPELINE_STAGE_DOWNLOAD_VIDEO in completed_stages and \
+                    PIPELINE_STAGE_REMASTER_ASR not in completed_stages and \
+                    _as_bool(self.config.get('REMASTER_PIPELINE_ENABLED', False)):
+                try:
+                    self._run_remaster_asr(task_id, task_logger)
+                except Exception as e:
+                    task_logger.error(f"重制 ASR 异常: {e}")
+                completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_REMASTER_ASR)
+
             # 5. 字幕处理（翻译或烧录启用时）
             subtitle_translation_enabled = _as_bool(self.config.get('SUBTITLE_TRANSLATION_ENABLED', False))
             subtitle_embed_enabled = _as_bool(self.config.get('SUBTITLE_EMBED_IN_VIDEO', True))
@@ -3040,6 +3051,53 @@ class TaskProcessor:
         )
         return False
     
+    def _run_remaster_asr(self, task_id, task_logger):
+        """AI 重制管线第一步:WhisperX 本地 ASR + 字级对齐,产出字级 SRT。"""
+        from modules.whisperx_asr import WhisperXAsr
+
+        task = get_task(task_id)
+        if not task:
+            task_logger.error("任务不存在")
+            return False
+        video_path = task.get('video_path_local', '')
+        if not video_path or not os.path.exists(video_path):
+            task_logger.warning("视频文件缺失,跳过重制 ASR")
+            return False
+
+        python_bin = str(self.config.get('WHISPERX_ASR_PYTHON', '') or '').strip()
+        runner_path = str(self.config.get('WHISPERX_RUNNER', 'modules/whisperx_runner.py') or '').strip()
+        if not runner_path or not os.path.isabs(runner_path):
+            runner_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), runner_path)
+
+        task_dir = os.path.join(DOWNLOADS_DIR, task_id)
+        os.makedirs(task_dir, exist_ok=True)
+        out_srt = os.path.join(task_dir, f"asr_whisperx_{task_id}.srt")
+
+        update_task(task_id, status=TASK_STATES.get('ASR_TRANSCRIBING', TASK_STATES['PROCESSING']))
+        task_logger.info(f"重制管线:调用 WhisperX({self.config.get('WHISPERX_MODEL_NAME', 'large-v3')}/{self.config.get('WHISPERX_DEVICE', 'cpu')}),输出 {out_srt}")
+
+        asr = WhisperXAsr(python_bin=python_bin, runner_path=runner_path)
+        asr.logger = task_logger
+        ok, res = asr.transcribe(
+            video_file_path=video_path, output_srt_path=out_srt,
+            language=str(self.config.get('SUBTITLE_SOURCE_LANGUAGE', 'auto') or 'auto'),
+            model=str(self.config.get('WHISPERX_MODEL_NAME', 'large-v3') or 'large-v3'),
+            device=str(self.config.get('WHISPERX_DEVICE', 'cpu') or 'cpu'),
+            compute_type=str(self.config.get('WHISPERX_COMPUTE_TYPE', 'int8') or 'int8'),
+            batch_size=int(self.config.get('WHISPERX_BATCH_SIZE', 16) or 16),
+            task_id=task_id,
+            progress_callback=lambda t: task_logger.info(f"[whisperx] {t}"),
+            timeout=int(self.config.get('WHISPERX_TIMEOUT_SECONDS', 7200) or 7200),
+        )
+        if ok:
+            update_task(task_id, subtitle_path_original=out_srt,
+                        subtitle_language_detected=None, asr_warning_message=None)
+            task_logger.info(f"重制 ASR 完成: {res}")
+            return True
+        task_logger.error(f"重制 ASR 失败: {res}")
+        update_task(task_id, asr_warning_message=f"whisperx: {res}")
+        return False
+
     def _translate_subtitle(self, task_id, task_logger, embed_in_video_override=None):
         """翻译字幕文件"""
         task = get_task(task_id)
