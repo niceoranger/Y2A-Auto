@@ -395,15 +395,19 @@ def get_subtitle_system_prompt(
     mode: str = MODE_BUILTIN,
     user_text: str = "",
     target_language: str = "zh",
+    glossary_text: str = "",
 ) -> str:
-    """获取字幕翻译最终 system prompt（含协议壳和 JSON 后缀）。"""
+    """获取字幕翻译最终 system prompt（含协议壳和 JSON 后缀）。
+
+    glossary_text: 术语对照段（RAG 命中术语），插在行为规则后、JSON 说明前；空则无变化。
+    """
     behavior = get_final_system_prompt(
         "SUBTITLE_TRANSLATE",
         mode=mode,
         user_text=user_text,
         target_language=target_language,
     )
-    return f"{behavior}{_SUBTITLE_SHARED_RULES}{_SUBTITLE_JSON_SUFFIX}"
+    return f"{behavior}{_SUBTITLE_SHARED_RULES}{glossary_text}{_SUBTITLE_JSON_SUFFIX}"
 
 
 def get_subtitle_strict_system_prompt(
@@ -411,15 +415,19 @@ def get_subtitle_strict_system_prompt(
     mode: str = MODE_BUILTIN,
     user_text: str = "",
     target_language: str = "zh",
+    glossary_text: str = "",
 ) -> str:
-    """获取字幕翻译严格补救最终 system prompt（含协议壳和 JSON 后缀）。"""
+    """获取字幕翻译严格补救最终 system prompt（含协议壳和 JSON 后缀）。
+
+    glossary_text: 术语对照段（RAG 命中术语），插在行为规则后、JSON 说明前；空则无变化。
+    """
     behavior = get_final_system_prompt(
         "SUBTITLE_TRANSLATE_STRICT",
         mode=mode,
         user_text=user_text,
         target_language=target_language,
     )
-    return f"{behavior}{_SUBTITLE_STRICT_SHARED_RULES}{_SUBTITLE_JSON_SUFFIX}"
+    return f"{behavior}{_SUBTITLE_STRICT_SHARED_RULES}{glossary_text}{_SUBTITLE_JSON_SUFFIX}"
 
 
 # ---------------------------------------------------------------------------
