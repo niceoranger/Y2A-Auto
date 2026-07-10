@@ -340,6 +340,7 @@ TASK_STATES = {
     'DOWNLOADING': 'downloading',         # 正在下载
     'DOWNLOADED': 'downloaded',           # 下载完成
     'ASR_TRANSCRIBING': 'asr_transcribing',  # 语音转写中
+    'AUDIO_SEPARATING': 'audio_separating',  # 音轨分离中(Demucs)
     'TRANSLATING_SUBTITLE': 'translating_subtitle',  # 正在翻译字幕
     'ENCODING_VIDEO': 'encoding_video',   # 正在转码视频
     'TRANSLATING': 'translating',         # 正在翻译
@@ -364,6 +365,7 @@ PROCESSING_STATES = [
     TASK_STATES['DOWNLOADING'],
     TASK_STATES['DOWNLOADED'],
     TASK_STATES['ASR_TRANSCRIBING'],
+    TASK_STATES['AUDIO_SEPARATING'],
     TASK_STATES['TRANSLATING_SUBTITLE'],
     TASK_STATES['ENCODING_VIDEO'],
     TASK_STATES['UPLOADING'],
@@ -381,6 +383,7 @@ PIPELINE_STAGE_RECOMMEND_PARTITION = 'recommend_partition'
 PIPELINE_STAGE_MODERATE_CONTENT = 'moderate_content'
 PIPELINE_STAGE_DOWNLOAD_VIDEO = 'download_video'
 PIPELINE_STAGE_REMASTER_ASR = 'remaster_asr'
+PIPELINE_STAGE_REMASTER_DEMUCS = 'remaster_demucs'
 PIPELINE_STAGE_TRANSLATE_SUBTITLE = 'translate_subtitle'
 PIPELINE_STAGE_UPLOAD_TO_ACFUN = 'upload_to_acfun'
 
@@ -392,6 +395,7 @@ PIPELINE_STAGE_ORDER = [
     PIPELINE_STAGE_MODERATE_CONTENT,
     PIPELINE_STAGE_DOWNLOAD_VIDEO,
     PIPELINE_STAGE_REMASTER_ASR,
+    PIPELINE_STAGE_REMASTER_DEMUCS,
     PIPELINE_STAGE_TRANSLATE_SUBTITLE,
     PIPELINE_STAGE_UPLOAD_TO_ACFUN,
 ]
@@ -1041,7 +1045,8 @@ def init_db():
         acfun_upload_response TEXT,
         bilibili_upload_response TEXT,
         asr_warning_message TEXT,  -- ASR/VAD阶段的非致命警告（如vad_low_coverage），不影响上传流程
-        subtitle_warning_message TEXT  -- 字幕处理阶段的非致命警告（如烧录失败），不影响上传流程
+        subtitle_warning_message TEXT,  -- 字幕处理阶段的非致命警告（如烧录失败），不影响上传流程
+        demucs_warning_message TEXT  -- Demucs 音轨分离阶段的非致命警告，不影响上传流程
     )
     ''')
     
@@ -1290,6 +1295,13 @@ def init_db():
             logger.info("数据库升级：添加subtitle_warning_message字段")
             conn.commit()
 
+        cursor.execute("PRAGMA table_info(tasks)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'demucs_warning_message' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN demucs_warning_message TEXT")
+            logger.info("数据库升级：添加demucs_warning_message字段")
+            conn.commit()
+
         # 数据迁移：将 error_message 中纯 ASR/VAD 警告 token 挪至 asr_warning_message，清空 error_message
         cursor.execute(
             "SELECT 1 FROM schema_migrations WHERE migration_key = ? LIMIT 1",
@@ -1489,6 +1501,7 @@ def update_task(task_id, silent=False, **kwargs):
         'bilibili_upload_response': 'bilibili_upload_response = ?',
         'asr_warning_message': 'asr_warning_message = ?',
         'subtitle_warning_message': 'subtitle_warning_message = ?',
+        'demucs_warning_message': 'demucs_warning_message = ?',
         'sau_upload_responses': 'sau_upload_responses = ?',
         'upload_targets': 'upload_targets = ?',
     }
@@ -2460,6 +2473,11 @@ class TaskProcessor:
                 except Exception as e:
                     task_logger.error(f"重制 ASR 异常: {e}")
                 completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_REMASTER_ASR)
+                try:
+                    self._run_remaster_demucs(task_id, task_logger)
+                except Exception as e:
+                    task_logger.error(f"重制 Demucs 异常: {e}")
+                completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_REMASTER_DEMUCS)
 
             # 5. 字幕处理（翻译或烧录启用时）
             subtitle_translation_enabled = _as_bool(self.config.get('SUBTITLE_TRANSLATION_ENABLED', False))
@@ -3099,6 +3117,55 @@ class TaskProcessor:
             return True
         task_logger.error(f"重制 ASR 失败: {res}")
         update_task(task_id, asr_warning_message=f"whisperx: {res}", status=prev_status)
+        return False
+
+    def _run_remaster_demucs(self, task_id, task_logger):
+        """AI 重制管线:Demucs 本地音轨分离,产出 vocals/no_vocals 两条 wav 落盘。
+
+        只产中间产物落盘,不写任何下游业务字段(与 _run_remaster_asr 边界一致);
+        供未来 TTS 配音子项目消费。软失败:失败不阻断 ASR/翻译/上传。
+        """
+        from modules.demucs_separator import DemucsSeparator
+
+        task = get_task(task_id)
+        if not task:
+            task_logger.error("任务不存在")
+            return False
+        video_path = task.get('video_path_local', '')
+        if not video_path or not os.path.exists(video_path):
+            task_logger.warning("视频文件缺失,跳过音轨分离")
+            return False
+
+        python_bin = str(self.config.get('DEMUCS_PYTHON', '') or '').strip()
+        runner_path = str(self.config.get('DEMUCS_RUNNER', 'modules/demucs_runner.py') or '').strip()
+        if not runner_path or not os.path.isabs(runner_path):
+            runner_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), runner_path)
+
+        task_dir = os.path.join(DOWNLOADS_DIR, task_id)
+        os.makedirs(task_dir, exist_ok=True)
+
+        prev_status = task.get('status')
+        update_task(task_id, status=TASK_STATES['AUDIO_SEPARATING'])
+        task_logger.info(f"重制管线:调用 Demucs({self.config.get('DEMUCS_MODEL_NAME', 'htdemucs_ft')}/{self.config.get('DEMUCS_DEVICE', 'mps')}),输出目录 {task_dir}")
+
+        sep = DemucsSeparator(python_bin=python_bin, runner_path=runner_path)
+        sep.logger = task_logger
+        ok, res = sep.separate(
+            video_path=video_path, output_dir=task_dir, task_id=task_id,
+            model=str(self.config.get('DEMUCS_MODEL_NAME', 'htdemucs_ft') or 'htdemucs_ft'),
+            device=str(self.config.get('DEMUCS_DEVICE', 'mps') or 'mps'),
+            stems=_as_int(self.config.get('DEMUCS_STEMS', 2), 2, minimum=2),
+            progress_callback=lambda t: task_logger.info(f"[demucs] {t}"),
+            timeout=_as_int(self.config.get('DEMUCS_TIMEOUT_SECONDS', 7200), 7200, minimum=60),
+        )
+        if ok:
+            # 只产中间产物(vocals/no_vocals wav 落盘在 task_dir),不写任何下游字段,
+            # 供后续 TTS 配音子项目刻意接入。见 spec §1。
+            update_task(task_id, demucs_warning_message=None, status=prev_status)
+            task_logger.info(f"音轨分离完成: {res}")
+            return True
+        task_logger.error(f"音轨分离失败: {res}")
+        update_task(task_id, demucs_warning_message=f"demucs: {res}", status=prev_status)
         return False
 
     def _translate_subtitle(self, task_id, task_logger, embed_in_video_override=None):

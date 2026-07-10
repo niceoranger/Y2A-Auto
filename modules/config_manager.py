@@ -85,6 +85,13 @@ DEFAULT_CONFIG = {
     "WHISPERX_COMPUTE_TYPE": "int8",         # CPU 量化
     "WHISPERX_BATCH_SIZE": 16,               # 转写/对齐 batch
     "WHISPERX_TIMEOUT_SECONDS": 7200,        # 长视频 CPU 跑慢,超时 2h
+    # AI 重制管线(Phase 3)——Demucs 音轨分离子系统(复用 REMASTER 总开关)
+    "DEMUCS_PYTHON": "/Users/mac/asr-venv/bin/python",  # 复用 asr-venv
+    "DEMUCS_RUNNER": "modules/demucs_runner.py",         # runner 脚本(相对项目根)
+    "DEMUCS_MODEL_NAME": "htdemucs_ft",   # 最高精度(4x 慢于 htdemucs)
+    "DEMUCS_DEVICE": "mps",               # Apple Silicon 加速, runner 内 CPU 兜底
+    "DEMUCS_STEMS": 2,                    # 2-stem: vocals / no_vocals
+    "DEMUCS_TIMEOUT_SECONDS": 7200,       # 长视频分离超时 2h
     # 多选投稿平台列表(新):如 ["bilibili","douyin"]。空列表视为 ["acfun"]
     "UPLOAD_TARGETS": ["acfun"],
     # social-auto-upload 集成
