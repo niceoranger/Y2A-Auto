@@ -56,6 +56,7 @@ class GlossaryStore:
                 data = json.load(f)
             if isinstance(data, dict):
                 return cls({str(k): str(v) for k, v in data.items()})
-        except Exception:
+        except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError):
+            # 文件不存在/JSON 损坏/格式非法 → 退化为空表；权限、磁盘等真实故障向上抛出
             pass
         return cls({})
