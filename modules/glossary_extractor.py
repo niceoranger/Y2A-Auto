@@ -64,10 +64,10 @@ class GlossaryExtractor:
             return {}
 
     def _parse(self, content: str) -> Dict[str, str]:
-        try:
-            data = json.loads(content)
-        except Exception:
-            return {}
+        # 用 extract_json_from_text 剥离 markdown code fence / reasoning 包裹，
+        # 因为本地模型(如 qwopus)常无视 response_format 仍把 JSON 裹进 ```json fence。
+        from .utils import extract_json_from_text
+        data = extract_json_from_text(content, expected_type=dict)
         if not isinstance(data, dict) or "terms" not in data:
             return {}
         terms = data.get("terms", [])
