@@ -3073,6 +3073,7 @@ class TaskProcessor:
         os.makedirs(task_dir, exist_ok=True)
         out_srt = os.path.join(task_dir, f"asr_whisperx_{task_id}.srt")
 
+        prev_status = task.get('status')
         update_task(task_id, status=TASK_STATES.get('ASR_TRANSCRIBING', TASK_STATES['PROCESSING']))
         task_logger.info(f"重制管线:调用 WhisperX({self.config.get('WHISPERX_MODEL_NAME', 'large-v3')}/{self.config.get('WHISPERX_DEVICE', 'cpu')}),输出 {out_srt}")
 
@@ -3084,18 +3085,19 @@ class TaskProcessor:
             model=str(self.config.get('WHISPERX_MODEL_NAME', 'large-v3') or 'large-v3'),
             device=str(self.config.get('WHISPERX_DEVICE', 'cpu') or 'cpu'),
             compute_type=str(self.config.get('WHISPERX_COMPUTE_TYPE', 'int8') or 'int8'),
-            batch_size=int(self.config.get('WHISPERX_BATCH_SIZE', 16) or 16),
+            batch_size=_as_int(self.config.get('WHISPERX_BATCH_SIZE', 16), 16, minimum=1),
             task_id=task_id,
             progress_callback=lambda t: task_logger.info(f"[whisperx] {t}"),
-            timeout=int(self.config.get('WHISPERX_TIMEOUT_SECONDS', 7200) or 7200),
+            timeout=_as_int(self.config.get('WHISPERX_TIMEOUT_SECONDS', 7200), 7200, minimum=60),
         )
         if ok:
             update_task(task_id, subtitle_path_original=out_srt,
-                        subtitle_language_detected=None, asr_warning_message=None)
+                        subtitle_language_detected=None, asr_warning_message=None,
+                        status=prev_status)
             task_logger.info(f"重制 ASR 完成: {res}")
             return True
         task_logger.error(f"重制 ASR 失败: {res}")
-        update_task(task_id, asr_warning_message=f"whisperx: {res}")
+        update_task(task_id, asr_warning_message=f"whisperx: {res}", status=prev_status)
         return False
 
     def _translate_subtitle(self, task_id, task_logger, embed_in_video_override=None):
