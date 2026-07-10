@@ -383,18 +383,18 @@ class LLMRequester:
         except Exception as e:
             self.logger.error(f"初始化OpenAI客户端失败: {e}")
     
-    def translate_batch(self, texts: List[str], target_language: str, batch_id: str = "") -> List[str]:
+    def translate_batch(self, texts: List[str], target_language: str, batch_id: str = "", glossary_text: str = "") -> List[str]:
         """批量翻译文本，使用结构化JSON输出"""
         if not texts:
             return []
         if not self.client:
             raise RuntimeError("OpenAI客户端未初始化")
-        
+
         try:
             self._batch_counter += 1
             log_as_info = self._should_log_batch(batch_id)
             # 构建翻译提示词
-            system_prompt = self._build_structured_system_prompt(target_language)
+            system_prompt = self._build_structured_system_prompt(target_language, glossary_text)
             user_prompt = self._build_structured_user_prompt(texts)
             
             model_name = self.openai_config.get('OPENAI_MODEL_NAME', 'gpt-3.5-turbo')
@@ -459,14 +459,14 @@ class LLMRequester:
         except Exception:
             return True
 
-    def translate_batch_strict(self, texts: List[str], target_language: str, batch_id: str = "") -> List[str]:
+    def translate_batch_strict(self, texts: List[str], target_language: str, batch_id: str = "", glossary_text: str = "") -> List[str]:
         """严格模式批量翻译：用于补救仍未译的条目，强制全中文输出。"""
         if not texts:
             return []
         if not self.client:
             raise RuntimeError("OpenAI客户端未初始化")
         try:
-            system_prompt = self._build_strict_structured_system_prompt(target_language)
+            system_prompt = self._build_strict_structured_system_prompt(target_language, glossary_text)
             user_prompt = self._build_structured_user_prompt(texts)
             model_name = self.openai_config.get('OPENAI_MODEL_NAME', 'gpt-3.5-turbo')
             with self._log_lock:
@@ -500,16 +500,17 @@ class LLMRequester:
                 self.logger.error(f"严格模式批次 {batch_id} 翻译失败: {e}")
             raise
     
-    def _build_structured_system_prompt(self, target_language: str) -> str:
+    def _build_structured_system_prompt(self, target_language: str, glossary_text: str = "") -> str:
         """构建结构化系统提示词（委托给统一 Prompt 中心）。"""
         from .prompt_manager import get_subtitle_system_prompt
         return get_subtitle_system_prompt(
             mode=self.openai_config.get('PROMPT_MODE', 'builtin'),
             user_text=self.openai_config.get('PROMPT_TEXT', ''),
             target_language=target_language,
+            glossary_text=glossary_text,
         )
 
-    def _build_strict_structured_system_prompt(self, target_language: str) -> str:
+    def _build_strict_structured_system_prompt(self, target_language: str, glossary_text: str = "") -> str:
         """严格模式提示词（委托给统一 Prompt 中心）。"""
         from .prompt_manager import get_subtitle_strict_system_prompt
         return get_subtitle_strict_system_prompt(
@@ -519,6 +520,7 @@ class LLMRequester:
             ),
             user_text=self.openai_config.get('PROMPT_STRICT_TEXT', ''),
             target_language=target_language,
+            glossary_text=glossary_text,
         )
     
     def _build_structured_user_prompt(self, texts: List[str]) -> str:
