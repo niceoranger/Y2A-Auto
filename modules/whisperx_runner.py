@@ -46,13 +46,17 @@ def render_srt(segments) -> str:
 
 
 def extract_audio_wav(video_path: str) -> str:
-    """ffmpeg 提取 16kHz mono wav(WhisperX 期望)。"""
+    """ffmpeg 提取 16kHz mono wav(WhisperX 期望)。失败时把 ffmpeg stderr 带进异常便于排查。"""
     out = os.path.abspath(video_path) + ".asr16k.wav"
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1",
-         "-ar", "16000", "-f", "wav", out],
-        check=True, capture_output=True,
-    )
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1",
+             "-ar", "16000", "-f", "wav", out],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or b"").decode(errors="ignore")[-400:]
+        raise RuntimeError(f"ffmpeg 提取音频失败: {detail}") from None
     return out
 
 
@@ -90,7 +94,9 @@ def main():
         print("[whisperx] 转写(段级)", flush=True)
         result = model.transcribe(audio, batch_size=args.batch_size, language=lang_arg)
         segs = result.get("segments", []) or []
-        lang = result.get("language") or args.language or "en"
+        lang = result.get("language")
+        if not lang or lang == "auto":
+            lang = "en"
         try:
             print(f"[whisperx] 对齐(字级, lang={lang})", flush=True)
             model_a, metadata = whisperx.load_align_model(language_code=lang, device=args.device)
