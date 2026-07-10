@@ -757,14 +757,12 @@ class SubtitleTranslator:
                     terms = extractor.extract(all_src, target_language=self.config.target_language)
                     self.glossary_store = GlossaryStore(terms)
                     self.logger.info(f"术语表抽取完成，命中 {len(self.glossary_store)} 条术语")
-                    # 持久化到任务目录（每任务独立）
-                    try:
-                        import os as _os
-                        task_dir = _os.path.join("downloads", str(self.task_id))
-                        if _os.path.isdir(task_dir) and len(self.glossary_store) > 0:
-                            self.glossary_store.save(_os.path.join(task_dir, "glossary.json"))
-                    except Exception as _se:
-                        self.logger.debug(f"术语表持久化跳过: {_se}")
+                    # 持久化到任务目录（每任务独立；save() 自身 makedirs，无需预判目录）
+                    if len(self.glossary_store) > 0:
+                        try:
+                            self.glossary_store.save(os.path.join("downloads", str(self.task_id), "glossary.json"))
+                        except Exception as _se:
+                            self.logger.debug(f"术语表持久化跳过: {_se}")
                 except Exception as e:
                     self.logger.warning(f"术语表抽取异常，退化为普通翻译: {e}")
 
