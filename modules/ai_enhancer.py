@@ -160,18 +160,12 @@ def get_openai_client(openai_config):
     """
     创建OpenAI客户端。
     """
-    api_key = openai_config.get('OPENAI_API_KEY', '')
-    options = {}
-    if openai_config.get('OPENAI_BASE_URL'):
-        options['base_url'] = openai_config.get('OPENAI_BASE_URL')
-    timeout_value = openai_config.get('OPENAI_TIMEOUT_SECONDS', 600)
-    try:
-        timeout_seconds = float(str(timeout_value).strip())
-    except Exception:
-        timeout_seconds = 600.0
-    if timeout_seconds > 0:
-        options['timeout'] = timeout_seconds
-    return openai.OpenAI(api_key=api_key, **options)
+    from .utils import build_openai_client
+    return build_openai_client(
+        api_key=openai_config.get('OPENAI_API_KEY', ''),
+        base_url=openai_config.get('OPENAI_BASE_URL') or None,
+        timeout=openai_config.get('OPENAI_TIMEOUT_SECONDS', 600),
+    )
 
 
 def _is_timeout_like_error(exc: Exception) -> bool:

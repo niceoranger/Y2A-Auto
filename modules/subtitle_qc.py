@@ -188,13 +188,8 @@ def _classify_suspicious_text(text: str, normalized: str) -> Optional[str]:
 
 
 def _build_openai_client(api_key: str, base_url: str):
-    import openai
-
-    options: Dict[str, Any] = {}
-    if base_url:
-        options['base_url'] = base_url
-    options['timeout'] = 120.0
-    return openai.OpenAI(api_key=api_key, **options)
+    from .utils import build_openai_client
+    return build_openai_client(api_key=api_key, base_url=base_url or None, timeout=120.0)
 
 
 def _build_item_stats(items: List[Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:

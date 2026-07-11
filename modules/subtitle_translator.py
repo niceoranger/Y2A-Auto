@@ -79,33 +79,12 @@ def get_openai_client(openai_config):
     Returns:
         OpenAI客户端实例
     """
-    import openai
-    
-    # 配置选项
-    api_key = openai_config.get('OPENAI_API_KEY', '')
-    options = {}
-    
-    # 如果提供了base_url，添加到选项中
-    if openai_config.get('OPENAI_BASE_URL'):
-        options['base_url'] = openai_config.get('OPENAI_BASE_URL')
-    timeout_value = openai_config.get('OPENAI_TIMEOUT_SECONDS', 600)
-    try:
-        timeout_seconds = float(str(timeout_value).strip())
-    except Exception:
-        timeout_seconds = 600.0
-    if timeout_seconds > 0:
-        options['timeout'] = timeout_seconds
-
-    # 本地端点直连,不走代理:macOS 系统代理(如 Clash @127.0.0.1:7897)会让 httpx 对
-    # 127.0.0.1 的请求 502(httpx 不读系统 bypass 列表,只认 NO_PROXY 环境变量)。
-    # 本地 LLM 本就不该经代理,base_url 指向 localhost 时强制 trust_env=False 直连。
-    base_url = openai_config.get('OPENAI_BASE_URL', '')
-    if base_url and any(h in base_url for h in ('127.0.0.1', 'localhost')):
-        import httpx
-        options['http_client'] = httpx.Client(trust_env=False)
-
-    # 创建并返回新版客户端实例
-    return openai.OpenAI(api_key=api_key, **options)
+    from .utils import build_openai_client
+    return build_openai_client(
+        api_key=openai_config.get('OPENAI_API_KEY', ''),
+        base_url=openai_config.get('OPENAI_BASE_URL') or None,
+        timeout=openai_config.get('OPENAI_TIMEOUT_SECONDS', 600),
+    )
 
 @dataclass
 class SubtitleItem:

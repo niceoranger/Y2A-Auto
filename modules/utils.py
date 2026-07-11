@@ -353,3 +353,39 @@ def openai_chat_create_with_thinking_control(
                     "thinking 控制参数不受支持，继续普通请求"
                 )
         return client.chat.completions.create(**create_kwargs)
+
+
+def build_openai_client(api_key, base_url=None, timeout=None):
+    """构造 OpenAI 客户端,统一处理本地端点直连(不走代理)。
+
+    macOS 系统代理(如 Clash @127.0.0.1:7897)会让 httpx 对 127.0.0.1 的请求返回 502
+    (httpx 不读 macOS 系统 bypass 列表,只认 NO_PROXY 环境变量)。本地 LLM 语义上也不该
+    经代理,故 base_url 指向 127.0.0.1/localhost 时给客户端传 httpx.Client(trust_env=False) 直连。
+
+    Args:
+        api_key: OpenAI API key
+        base_url: 可选,自定义端点(本地 LLM 走这里)
+        timeout: 可选,秒;非法或 <=0 时忽略(交由 openai 默认值兜底)
+
+    Returns:
+        openai.OpenAI 客户端实例
+    """
+    import openai
+
+    options = {}
+    if base_url:
+        options['base_url'] = base_url
+    if timeout is not None:
+        try:
+            timeout_seconds = float(timeout)
+        except (TypeError, ValueError):
+            timeout_seconds = 0.0
+        if timeout_seconds > 0:
+            options['timeout'] = timeout_seconds
+
+    # 本地端点强制直连,绕过系统代理(详见 docstring)
+    if base_url and any(h in base_url for h in ('127.0.0.1', 'localhost')):
+        import httpx
+        options['http_client'] = httpx.Client(trust_env=False)
+
+    return openai.OpenAI(api_key=api_key, **options)

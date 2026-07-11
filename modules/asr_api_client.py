@@ -137,12 +137,11 @@ class AsrApiClient:
                 self.logger.info("%s client initialised successfully", self.config.provider)
                 return
 
-            import openai
-
-            opts: Dict[str, Any] = {}
-            if self.config.base_url:
-                opts['base_url'] = self.config.base_url
-            self.client = openai.OpenAI(api_key=self.config.api_key, **opts)
+            from .utils import build_openai_client
+            self.client = build_openai_client(
+                api_key=self.config.api_key,
+                base_url=self.config.base_url or None,
+            )
             self.logger.info("ASR API client initialised successfully")
         except Exception as exc:
             self.logger.error("Failed to initialise ASR API client: %s", exc)
