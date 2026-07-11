@@ -11,7 +11,7 @@ class TestOcrConfig(unittest.TestCase):
     def test_defaults_present(self):
         for k in [
             "OCR_PYTHON", "OCR_RUNNER", "OCR_SAMPLE_INTERVAL_SEC",
-            "OCR_LANG", "OCR_DEVICE", "OCR_IOU_THRESHOLD", "OCR_TIMEOUT_SECONDS",
+            "OCR_LANG", "OCR_DEVICE", "OCR_IOU_THRESHOLD", "OCR_BOTTOM_BAND_MIN_Y", "OCR_TIMEOUT_SECONDS",
         ]:
             self.assertIn(k, DEFAULT_CONFIG)
         self.assertEqual(DEFAULT_CONFIG["OCR_PYTHON"], "/Users/mac/asr-venv/bin/python")
@@ -20,6 +20,7 @@ class TestOcrConfig(unittest.TestCase):
         self.assertEqual(DEFAULT_CONFIG["OCR_LANG"], "ch")
         self.assertEqual(DEFAULT_CONFIG["OCR_DEVICE"], "cpu")
         self.assertEqual(DEFAULT_CONFIG["OCR_IOU_THRESHOLD"], 0.5)
+        self.assertEqual(DEFAULT_CONFIG["OCR_BOTTOM_BAND_MIN_Y"], 0.6)
         self.assertEqual(DEFAULT_CONFIG["OCR_TIMEOUT_SECONDS"], 3600)
 
     def test_remaster_switch_still_off(self):

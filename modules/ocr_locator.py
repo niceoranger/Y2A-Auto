@@ -26,7 +26,8 @@ class OcrLocator:
 
     def locate(self, *, video_path, output_json, task_id,
                sample_interval_sec=0.5, lang="ch", device="cpu",
-               iou_threshold=0.5, progress_callback=None, timeout=3600):
+               iou_threshold=0.5, bottom_band_min_y=0.6,
+               progress_callback=None, timeout=3600):
         """返回 (True, {ok, boxes, ...}) 或 (False, error_msg)。"""
         self.task_id = task_id
         if not self.python_bin or not os.path.isfile(self.python_bin):
@@ -43,7 +44,8 @@ class OcrLocator:
                "--sample-interval", str(sample_interval_sec if sample_interval_sec is not None else 0.5),
                "--lang", str(lang or "ch"),
                "--device", str(device or "cpu"),
-               "--iou-threshold", str(iou_threshold if iou_threshold is not None else 0.5)]
+               "--iou-threshold", str(iou_threshold if iou_threshold is not None else 0.5),
+               "--bottom-band-min-y", str(bottom_band_min_y if bottom_band_min_y is not None else 0.6)]
         self._log(f"调用 ocr runner: {' '.join(cmd)}")
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

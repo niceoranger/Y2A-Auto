@@ -108,6 +108,7 @@ DEFAULT_CONFIG = {
     "OCR_LANG": "ch",
     "OCR_DEVICE": "cpu",
     "OCR_IOU_THRESHOLD": 0.5,
+    "OCR_BOTTOM_BAND_MIN_Y": 0.6,         # 底栏优先:只保留 y>=此值的检测;0=全画面
     "OCR_TIMEOUT_SECONDS": 3600,
     # AI 重制管线——FFmpeg 字幕擦除 + 成片合成(复用 REMASTER 总开关)
     "COMPOSITE_MAX_DELOGO_SEGMENTS": 40,   # delogo 段数上限,超出则合并相近段,防 filtergraph 爆炸

@@ -2,8 +2,15 @@
 """OCR 检测框时间聚类纯逻辑(无 I/O)。
 
 box: 归一化 [x, y, w, h]，原点左上，相对画面宽高。
+
+聚类策略(多轨):
+  - 每帧可能检出多个框(字幕+标题+水印);单链聚类会把不同轨互相打断。
+  - 多轨:每个检测找最佳匹配的活跃段(IoU>=threshold 且 gap<=max_gap),否则开新段;
+    超过 max_gap 未续上的活跃段关闭落盘。
+  - 点段扩展:单帧检测代表"此刻字幕可见",实际持续到下一采样点;
+    若提供 sample_interval,段 end 扩展一个 interval(便于 delogo enable 覆盖整段)。
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 def iou_box(a, b) -> float:
@@ -37,15 +44,34 @@ def merge_box(a, b) -> List[float]:
     return [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)]
 
 
+def filter_bottom_band(dets: List[Dict], min_y_ratio: float = 0.6) -> List[Dict]:
+    """保留底栏区域检测:box 顶部 y >= min_y_ratio。
+
+    min_y_ratio<=0 时不过滤(返回原列表)。用于优先保留烧录字幕(通常在画面下部),
+    过滤标题/水印/大块误检。
+    """
+    if not dets or min_y_ratio is None or min_y_ratio <= 0:
+        return list(dets)
+    out = []
+    for d in dets:
+        box = d.get("box") if isinstance(d, dict) else None
+        if not box or len(box) < 4:
+            continue
+        if float(box[1]) >= min_y_ratio:
+            out.append(d)
+    return out
+
+
 def cluster_detections(
     dets: List[Dict],
     iou_threshold: float = 0.5,
     max_gap_sec: float = 0.75,
+    sample_interval: Optional[float] = None,
 ) -> List[Dict]:
-    """将 [{t, box, score}, ...] 聚类为 [{start, end, box, score}, ...]。
+    """多轨聚类 → [{start, end, box, score}, ...]。
 
-    规则：按 t 排序；若与当前段 last 框 IoU>=threshold 且时间 gap<=max_gap_sec，
-    则并入（box 并集，score 均值）；否则新开段。
+    若提供 sample_interval(>0),每段 end 扩展一个 interval(点段覆盖到下一采样点),
+    便于下游 delogo enable 覆盖整段可见时间。
     """
     if not dets:
         return []
@@ -56,50 +82,74 @@ def cluster_detections(
     if not ordered:
         return []
 
-    segments = []
-    cur = {
-        "start": float(ordered[0]["t"]),
-        "end": float(ordered[0]["t"]),
-        "box": list(map(float, ordered[0]["box"][:4])),
-        "score_sum": float(ordered[0].get("score") or 0.0),
-        "score_n": 1,
-        "last_box": list(map(float, ordered[0]["box"][:4])),
-        "last_t": float(ordered[0]["t"]),
-    }
+    def _new_seg(d):
+        box = list(map(float, d["box"][:4]))
+        return {
+            "start": float(d["t"]),
+            "end": float(d["t"]),
+            "box": box,
+            "score_sum": float(d.get("score") or 0.0),
+            "score_n": 1,
+            "last_box": box,
+            "last_t": float(d["t"]),
+        }
+
+    def _finalize(seg):
+        return {
+            "start": seg["start"],
+            "end": seg["end"],
+            "box": seg["box"],
+            "score": seg["score_sum"] / max(1, seg["score_n"]),
+        }
+
+    active: List[Dict] = [_new_seg(ordered[0])]
+    results: List[Dict] = []
 
     for d in ordered[1:]:
         t = float(d["t"])
         box = list(map(float, d["box"][:4]))
         score = float(d.get("score") or 0.0)
-        gap = t - cur["last_t"]
-        if gap <= max_gap_sec and iou_box(cur["last_box"], box) >= iou_threshold:
-            cur["end"] = t
-            cur["box"] = merge_box(cur["box"], box)
-            cur["last_box"] = box
-            cur["last_t"] = t
-            cur["score_sum"] += score
-            cur["score_n"] += 1
-        else:
-            segments.append({
-                "start": cur["start"],
-                "end": cur["end"],
-                "box": cur["box"],
-                "score": cur["score_sum"] / max(1, cur["score_n"]),
-            })
-            cur = {
-                "start": t,
-                "end": t,
-                "box": box,
-                "score_sum": score,
-                "score_n": 1,
-                "last_box": box,
-                "last_t": t,
-            }
 
-    segments.append({
-        "start": cur["start"],
-        "end": cur["end"],
-        "box": cur["box"],
-        "score": cur["score_sum"] / max(1, cur["score_n"]),
-    })
-    return segments
+        # 关闭超 gap 的活跃段
+        still_active = []
+        for seg in active:
+            if t - seg["last_t"] <= max_gap_sec:
+                still_active.append(seg)
+            else:
+                results.append(_finalize(seg))
+        active = still_active
+
+        # 找最佳匹配(IoU 最大且 >= threshold)
+        best_idx, best_iou = -1, iou_threshold
+        for i, seg in enumerate(active):
+            iou = iou_box(seg["last_box"], box)
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = i
+
+        if best_idx >= 0:
+            seg = active[best_idx]
+            seg["end"] = t
+            seg["box"] = merge_box(seg["box"], box)
+            seg["last_box"] = box
+            seg["last_t"] = t
+            seg["score_sum"] += score
+            seg["score_n"] += 1
+        else:
+            active.append(_new_seg(d))
+
+    for seg in active:
+        results.append(_finalize(seg))
+
+    # 按 start 排序,便于下游稳定
+    results.sort(key=lambda s: (s["start"], s["end"]))
+
+    # 点段扩展:单帧检测持续到下一采样点
+    if sample_interval and sample_interval > 0:
+        for seg in results:
+            if seg["end"] <= seg["start"]:
+                seg["end"] = seg["start"] + sample_interval
+            else:
+                # 段尾也补一个 interval,覆盖最后一个采样点到下一次(若有)
+                seg["end"] = seg["end"] + sample_interval
+    return results

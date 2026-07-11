@@ -3278,6 +3278,12 @@ class TaskProcessor:
                 iou_threshold = 0.5
         except (TypeError, ValueError):
             iou_threshold = 0.5
+        try:
+            bottom_band_min_y = float(self.config.get('OCR_BOTTOM_BAND_MIN_Y', 0.6) or 0.0)
+            if bottom_band_min_y < 0:
+                bottom_band_min_y = 0.0
+        except (TypeError, ValueError):
+            bottom_band_min_y = 0.6
         lang = str(self.config.get('OCR_LANG', 'ch') or 'ch')
         device = str(self.config.get('OCR_DEVICE', 'cpu') or 'cpu')
         timeout = _as_int(self.config.get('OCR_TIMEOUT_SECONDS', 3600), 3600, minimum=60)
@@ -3285,7 +3291,8 @@ class TaskProcessor:
         prev_status = task.get('status')
         update_task(task_id, status=TASK_STATES['OCR_LOCATING'])
         task_logger.info(
-            f"重制管线:调用 OCR({lang}/{device}, interval={sample_interval}),输出 {out_json}"
+            f"重制管线:调用 OCR({lang}/{device}, interval={sample_interval}, "
+            f"bottom_y>={bottom_band_min_y}),输出 {out_json}"
         )
 
         locator = OcrLocator(python_bin=python_bin, runner_path=runner_path)
@@ -3298,6 +3305,7 @@ class TaskProcessor:
             lang=lang,
             device=device,
             iou_threshold=iou_threshold,
+            bottom_band_min_y=bottom_band_min_y,
             progress_callback=lambda t: task_logger.info(f"[ocr] {t}"),
             timeout=timeout,
         )

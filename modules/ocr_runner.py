@@ -241,6 +241,8 @@ def main():
     ap.add_argument("--lang", default="ch")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--iou-threshold", type=float, default=0.5)
+    ap.add_argument("--bottom-band-min-y", type=float, default=0.6,
+                    help="只保留 y>=此值的检测(底栏优先);0=全画面")
     args = ap.parse_args()
 
     if not os.path.isfile(args.video):
@@ -256,7 +258,7 @@ def main():
         return 2
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from modules.ocr_cluster import cluster_detections
+    from modules.ocr_cluster import cluster_detections, filter_bottom_band
 
     interval = float(args.sample_interval or 0.5)
     if interval <= 0:
@@ -288,11 +290,30 @@ def main():
         )
         print(f"[ocr] 有效检测 {len(dets)} 条", flush=True)
 
+        try:
+            bottom_min_y = float(args.bottom_band_min_y)
+        except (TypeError, ValueError, AttributeError):
+            bottom_min_y = 0.6
+        if bottom_min_y < 0:
+            bottom_min_y = 0.0
+        filtered = filter_bottom_band(dets, min_y_ratio=bottom_min_y)
+        if bottom_min_y > 0:
+            print(
+                f"[ocr] 底栏过滤 min_y={bottom_min_y}: {len(dets)} → {len(filtered)}",
+                flush=True,
+            )
+            # 若底栏过滤后全空,回退全画面(避免无字幕视频以外的误杀)
+            if filtered:
+                dets = filtered
+            else:
+                print("[ocr] 底栏过滤结果为空,回退全画面检测", flush=True)
+
         max_gap = 1.5 * interval
         segments = cluster_detections(
             dets,
             iou_threshold=float(args.iou_threshold or 0.5),
             max_gap_sec=max_gap,
+            sample_interval=interval,
         )
         payload = {
             "video": os.path.abspath(args.video),
@@ -300,7 +321,7 @@ def main():
             "height": meta["height"],
             "duration_sec": meta["duration_sec"],
             "sample_interval_sec": interval,
-            "roi": "full",
+            "roi": f"bottom_y>={bottom_min_y}" if bottom_min_y > 0 else "full",
             "lang": str(args.lang or "ch"),
             "segments": segments,
         }
