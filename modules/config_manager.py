@@ -101,6 +101,14 @@ DEFAULT_CONFIG = {
     "DUB_DEVICE": "cpu",                 # XTTS 自定义算子不支持 MPS
     "DUB_MAX_TEMPO": 1.5,                # RubberBand 最大加速倍率
     "DUB_TIMEOUT_SECONDS": 14400,        # 4h;CPU 配音慢
+    # AI 重制管线——PaddleOCR 字幕定位(复用 REMASTER 总开关)
+    "OCR_PYTHON": "/Users/mac/asr-venv/bin/python",
+    "OCR_RUNNER": "modules/ocr_runner.py",
+    "OCR_SAMPLE_INTERVAL_SEC": 0.5,
+    "OCR_LANG": "ch",
+    "OCR_DEVICE": "cpu",
+    "OCR_IOU_THRESHOLD": 0.5,
+    "OCR_TIMEOUT_SECONDS": 3600,
     # 多选投稿平台列表(新):如 ["bilibili","douyin"]。空列表视为 ["acfun"]
     "UPLOAD_TARGETS": ["acfun"],
     # social-auto-upload 集成

@@ -341,6 +341,7 @@ TASK_STATES = {
     'DOWNLOADED': 'downloaded',           # 下载完成
     'ASR_TRANSCRIBING': 'asr_transcribing',  # 语音转写中
     'AUDIO_SEPARATING': 'audio_separating',  # 音轨分离中(Demucs)
+    'OCR_LOCATING': 'ocr_locating',  # 字幕区域 OCR 定位中
     'DUBBING': 'dubbing',                    # 配音合成中(XTTS+RubberBand)
     'TRANSLATING_SUBTITLE': 'translating_subtitle',  # 正在翻译字幕
     'ENCODING_VIDEO': 'encoding_video',   # 正在转码视频
@@ -367,6 +368,7 @@ PROCESSING_STATES = [
     TASK_STATES['DOWNLOADED'],
     TASK_STATES['ASR_TRANSCRIBING'],
     TASK_STATES['AUDIO_SEPARATING'],
+    TASK_STATES['OCR_LOCATING'],
     TASK_STATES['DUBBING'],
     TASK_STATES['TRANSLATING_SUBTITLE'],
     TASK_STATES['ENCODING_VIDEO'],
@@ -386,6 +388,7 @@ PIPELINE_STAGE_MODERATE_CONTENT = 'moderate_content'
 PIPELINE_STAGE_DOWNLOAD_VIDEO = 'download_video'
 PIPELINE_STAGE_REMASTER_ASR = 'remaster_asr'
 PIPELINE_STAGE_REMASTER_DEMUCS = 'remaster_demucs'
+PIPELINE_STAGE_REMASTER_OCR = 'remaster_ocr'
 PIPELINE_STAGE_TRANSLATE_SUBTITLE = 'translate_subtitle'
 PIPELINE_STAGE_REMASTER_DUB = 'remaster_dub'
 PIPELINE_STAGE_UPLOAD_TO_ACFUN = 'upload_to_acfun'
@@ -399,6 +402,7 @@ PIPELINE_STAGE_ORDER = [
     PIPELINE_STAGE_DOWNLOAD_VIDEO,
     PIPELINE_STAGE_REMASTER_ASR,
     PIPELINE_STAGE_REMASTER_DEMUCS,
+    PIPELINE_STAGE_REMASTER_OCR,
     PIPELINE_STAGE_TRANSLATE_SUBTITLE,
     PIPELINE_STAGE_REMASTER_DUB,
     PIPELINE_STAGE_UPLOAD_TO_ACFUN,
@@ -1051,7 +1055,8 @@ def init_db():
         asr_warning_message TEXT,  -- ASR/VAD阶段的非致命警告（如vad_low_coverage），不影响上传流程
         subtitle_warning_message TEXT,  -- 字幕处理阶段的非致命警告（如烧录失败），不影响上传流程
         demucs_warning_message TEXT,  -- Demucs 音轨分离阶段的非致命警告，不影响上传流程
-        dub_warning_message TEXT  -- 配音阶段的非致命警告，不影响上传流程
+        dub_warning_message TEXT,  -- 配音阶段的非致命警告，不影响上传流程
+        ocr_warning_message TEXT  -- OCR 字幕定位阶段的非致命警告，不影响上传流程
     )
     ''')
     
@@ -1314,6 +1319,13 @@ def init_db():
             logger.info("数据库升级：添加dub_warning_message字段")
             conn.commit()
 
+        cursor.execute("PRAGMA table_info(tasks)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'ocr_warning_message' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN ocr_warning_message TEXT")
+            logger.info("数据库升级：添加ocr_warning_message字段")
+            conn.commit()
+
         # 数据迁移：将 error_message 中纯 ASR/VAD 警告 token 挪至 asr_warning_message，清空 error_message
         cursor.execute(
             "SELECT 1 FROM schema_migrations WHERE migration_key = ? LIMIT 1",
@@ -1515,6 +1527,7 @@ def update_task(task_id, silent=False, **kwargs):
         'subtitle_warning_message': 'subtitle_warning_message = ?',
         'demucs_warning_message': 'demucs_warning_message = ?',
         'dub_warning_message': 'dub_warning_message = ?',
+        'ocr_warning_message': 'ocr_warning_message = ?',
         'sau_upload_responses': 'sau_upload_responses = ?',
         'upload_targets': 'upload_targets = ?',
     }
@@ -2491,6 +2504,11 @@ class TaskProcessor:
                 except Exception as e:
                     task_logger.error(f"重制 Demucs 异常: {e}")
                 completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_REMASTER_DEMUCS)
+                try:
+                    self._run_remaster_ocr(task_id, task_logger)
+                except Exception as e:
+                    task_logger.error(f"重制 OCR 异常: {e}")
+                completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_REMASTER_OCR)
 
             # 5. 字幕处理（翻译或烧录启用时）
             subtitle_translation_enabled = _as_bool(self.config.get('SUBTITLE_TRANSLATION_ENABLED', False))
@@ -3191,6 +3209,80 @@ class TaskProcessor:
             return True
         task_logger.error(f"音轨分离失败: {res}")
         update_task(task_id, demucs_warning_message=f"demucs: {res}", status=prev_status)
+        return False
+
+    def _run_remaster_ocr(self, task_id, task_logger):
+        """AI 重制管线:PaddleOCR 字幕区域定位,产出 boxes JSON 落盘。
+
+        只产中间产物落盘,不写任何下游业务字段(与 _run_remaster_demucs 边界一致);
+        软失败:失败不阻断翻译/上传。
+        """
+        from modules.ocr_locator import OcrLocator
+
+        task = get_task(task_id)
+        if not task:
+            task_logger.error("任务不存在")
+            return False
+        video_path = task.get('video_path_local', '')
+        if not video_path or not os.path.exists(video_path):
+            task_logger.warning("视频文件缺失,跳过 OCR 字幕定位")
+            return False
+
+        python_bin = str(self.config.get('OCR_PYTHON', '') or '').strip()
+        runner_path = str(self.config.get('OCR_RUNNER', 'modules/ocr_runner.py') or '').strip()
+        if not runner_path or not os.path.isabs(runner_path):
+            runner_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                runner_path,
+            )
+
+        task_dir = os.path.join(DOWNLOADS_DIR, task_id)
+        os.makedirs(task_dir, exist_ok=True)
+        out_json = os.path.join(task_dir, f"ocr_subtitle_boxes_{task_id}.json")
+
+        # 配置解析放在 status 翻转之前,避免非法浮点导致任务卡在 OCR_LOCATING
+        try:
+            sample_interval = float(self.config.get('OCR_SAMPLE_INTERVAL_SEC', 0.5) or 0.5)
+            if sample_interval <= 0:
+                sample_interval = 0.5
+        except (TypeError, ValueError):
+            sample_interval = 0.5
+        try:
+            iou_threshold = float(self.config.get('OCR_IOU_THRESHOLD', 0.5) or 0.5)
+            if iou_threshold <= 0:
+                iou_threshold = 0.5
+        except (TypeError, ValueError):
+            iou_threshold = 0.5
+        lang = str(self.config.get('OCR_LANG', 'ch') or 'ch')
+        device = str(self.config.get('OCR_DEVICE', 'cpu') or 'cpu')
+        timeout = _as_int(self.config.get('OCR_TIMEOUT_SECONDS', 3600), 3600, minimum=60)
+
+        prev_status = task.get('status')
+        update_task(task_id, status=TASK_STATES['OCR_LOCATING'])
+        task_logger.info(
+            f"重制管线:调用 OCR({lang}/{device}, interval={sample_interval}),输出 {out_json}"
+        )
+
+        locator = OcrLocator(python_bin=python_bin, runner_path=runner_path)
+        locator.logger = task_logger
+        ok, res = locator.locate(
+            video_path=video_path,
+            output_json=out_json,
+            task_id=task_id,
+            sample_interval_sec=sample_interval,
+            lang=lang,
+            device=device,
+            iou_threshold=iou_threshold,
+            progress_callback=lambda t: task_logger.info(f"[ocr] {t}"),
+            timeout=timeout,
+        )
+        if ok:
+            # 只产中间产物(boxes JSON 落盘),不写视频/字幕路径。见 ocr design spec。
+            update_task(task_id, ocr_warning_message=None, status=prev_status)
+            task_logger.info(f"OCR 字幕定位完成: {res}")
+            return True
+        task_logger.error(f"OCR 字幕定位失败: {res}")
+        update_task(task_id, ocr_warning_message=f"ocr: {res}", status=prev_status)
         return False
 
     def _run_remaster_dub(self, task_id, task_logger):
