@@ -109,6 +109,11 @@ DEFAULT_CONFIG = {
     "OCR_DEVICE": "cpu",
     "OCR_IOU_THRESHOLD": 0.5,
     "OCR_TIMEOUT_SECONDS": 3600,
+    # AI 重制管线——FFmpeg 字幕擦除 + 成片合成(复用 REMASTER 总开关)
+    "COMPOSITE_MAX_DELOGO_SEGMENTS": 40,   # delogo 段数上限,超出则合并相近段,防 filtergraph 爆炸
+    "COMPOSITE_DELOGO_PAD_PX": 6,          # delogo 框四周额外像素,确保盖住抗锯齿边缘
+    "COMPOSITE_TIMEOUT_SECONDS": 10800,    # 3h,重编码长视频
+    "COMPOSITE_BURN_SUBTITLE": True,       # 是否硬烧译文字幕进画面
     # 多选投稿平台列表(新):如 ["bilibili","douyin"]。空列表视为 ["acfun"]
     "UPLOAD_TARGETS": ["acfun"],
     # social-auto-upload 集成

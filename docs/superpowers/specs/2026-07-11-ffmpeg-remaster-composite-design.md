@@ -47,6 +47,7 @@
 | OCR JSON / segments 空 | 跳过 delogo，画面原样 |
 | `dubbed_audio_*.wav` | 保留原视频音轨 |
 | `subtitle_path_translated` | 不烧硬字幕 |
+| ffmpeg 无 `subtitles` 滤镜（未编 libass） | 跳过硬烧，仍完成 delogo+配音；记日志（不 fail 任务） |
 
 ## 3. 架构
 

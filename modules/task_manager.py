@@ -343,6 +343,7 @@ TASK_STATES = {
     'AUDIO_SEPARATING': 'audio_separating',  # 音轨分离中(Demucs)
     'OCR_LOCATING': 'ocr_locating',  # 字幕区域 OCR 定位中
     'DUBBING': 'dubbing',                    # 配音合成中(XTTS+RubberBand)
+    'COMPOSITING': 'compositing',            # 成片合成中(delogo+配音+硬字幕)
     'TRANSLATING_SUBTITLE': 'translating_subtitle',  # 正在翻译字幕
     'ENCODING_VIDEO': 'encoding_video',   # 正在转码视频
     'TRANSLATING': 'translating',         # 正在翻译
@@ -370,6 +371,7 @@ PROCESSING_STATES = [
     TASK_STATES['AUDIO_SEPARATING'],
     TASK_STATES['OCR_LOCATING'],
     TASK_STATES['DUBBING'],
+    TASK_STATES['COMPOSITING'],
     TASK_STATES['TRANSLATING_SUBTITLE'],
     TASK_STATES['ENCODING_VIDEO'],
     TASK_STATES['UPLOADING'],
@@ -391,6 +393,7 @@ PIPELINE_STAGE_REMASTER_DEMUCS = 'remaster_demucs'
 PIPELINE_STAGE_REMASTER_OCR = 'remaster_ocr'
 PIPELINE_STAGE_TRANSLATE_SUBTITLE = 'translate_subtitle'
 PIPELINE_STAGE_REMASTER_DUB = 'remaster_dub'
+PIPELINE_STAGE_REMASTER_COMPOSITE = 'remaster_composite'
 PIPELINE_STAGE_UPLOAD_TO_ACFUN = 'upload_to_acfun'
 
 PIPELINE_STAGE_ORDER = [
@@ -405,6 +408,7 @@ PIPELINE_STAGE_ORDER = [
     PIPELINE_STAGE_REMASTER_OCR,
     PIPELINE_STAGE_TRANSLATE_SUBTITLE,
     PIPELINE_STAGE_REMASTER_DUB,
+    PIPELINE_STAGE_REMASTER_COMPOSITE,
     PIPELINE_STAGE_UPLOAD_TO_ACFUN,
 ]
 
@@ -1056,7 +1060,8 @@ def init_db():
         subtitle_warning_message TEXT,  -- 字幕处理阶段的非致命警告（如烧录失败），不影响上传流程
         demucs_warning_message TEXT,  -- Demucs 音轨分离阶段的非致命警告，不影响上传流程
         dub_warning_message TEXT,  -- 配音阶段的非致命警告，不影响上传流程
-        ocr_warning_message TEXT  -- OCR 字幕定位阶段的非致命警告，不影响上传流程
+        ocr_warning_message TEXT,  -- OCR 字幕定位阶段的非致命警告，不影响上传流程
+        composite_warning_message TEXT  -- 成片合成阶段的非致命警告，不影响上传流程
     )
     ''')
     
@@ -1326,6 +1331,13 @@ def init_db():
             logger.info("数据库升级：添加ocr_warning_message字段")
             conn.commit()
 
+        cursor.execute("PRAGMA table_info(tasks)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'composite_warning_message' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN composite_warning_message TEXT")
+            logger.info("数据库升级：添加composite_warning_message字段")
+            conn.commit()
+
         # 数据迁移：将 error_message 中纯 ASR/VAD 警告 token 挪至 asr_warning_message，清空 error_message
         cursor.execute(
             "SELECT 1 FROM schema_migrations WHERE migration_key = ? LIMIT 1",
@@ -1528,6 +1540,7 @@ def update_task(task_id, silent=False, **kwargs):
         'demucs_warning_message': 'demucs_warning_message = ?',
         'dub_warning_message': 'dub_warning_message = ?',
         'ocr_warning_message': 'ocr_warning_message = ?',
+        'composite_warning_message': 'composite_warning_message = ?',
         'sau_upload_responses': 'sau_upload_responses = ?',
         'upload_targets': 'upload_targets = ?',
     }
@@ -2537,6 +2550,18 @@ class TaskProcessor:
                     task_id, completed_stages, PIPELINE_STAGE_REMASTER_DUB
                 )
 
+            # 5c. AI 重制成片合成(delogo 擦字幕 + 配音 + 硬字幕; 依赖 dub 门控已跑)
+            if PIPELINE_STAGE_REMASTER_DUB in completed_stages and \
+                    PIPELINE_STAGE_REMASTER_COMPOSITE not in completed_stages and \
+                    _as_bool(self.config.get('REMASTER_PIPELINE_ENABLED', False)):
+                try:
+                    self._run_remaster_composite(task_id, task_logger)
+                except Exception as e:
+                    task_logger.error(f"重制成片合成异常: {e}")
+                completed_stages = _mark_stage_done(
+                    task_id, completed_stages, PIPELINE_STAGE_REMASTER_COMPOSITE
+                )
+
             # 6. 上传
             if self.config.get('AUTO_MODE_ENABLED', False):
                 # 若已有上传响应，避免重复上传
@@ -3367,6 +3392,90 @@ class TaskProcessor:
             return True
         task_logger.error(f"配音失败: {res}")
         update_task(task_id, dub_warning_message=f"dub: {res}", status=prev_status)
+        return False
+
+    def _run_remaster_composite(self, task_id, task_logger):
+        """AI 重制管线末步:delogo 擦烧录字幕 + 配音替换 + 硬烧译文字幕,产出成片。
+
+        成功时写回 video_path_local 供上传;失败软处理(记 composite_warning_message,
+        不改 video_path_local,继续上传原片)。缺件尽力合成。
+        """
+        from modules.remaster_composite import run_composite
+
+        task = get_task(task_id)
+        if not task:
+            task_logger.error("任务不存在")
+            return False
+        video_path = task.get('video_path_local', '')
+        if not video_path or not os.path.exists(video_path):
+            task_logger.warning("视频缺失,跳过成片合成")
+            return False
+
+        task_dir = os.path.join(DOWNLOADS_DIR, task_id)
+        ocr_json = os.path.join(task_dir, f"ocr_subtitle_boxes_{task_id}.json")
+        ocr_segments, vw, vh = [], 0, 0
+        if os.path.isfile(ocr_json):
+            try:
+                import json
+                with open(ocr_json, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                ocr_segments = data.get('segments', []) or []
+                vw = int(data.get('width') or 0)
+                vh = int(data.get('height') or 0)
+            except Exception as e:
+                task_logger.warning(f"OCR JSON 解析失败,跳过 delogo: {e}")
+        if vw <= 0 or vh <= 0:
+            info = self._get_video_stream_info(video_path, task_logger)
+            vw = int(info.get('width') or 0)
+            vh = int(info.get('height') or 0)
+        if vw <= 0 or vh <= 0:
+            task_logger.warning("无法确定视频分辨率,跳过成片合成")
+            return False
+
+        dubbed = os.path.join(task_dir, f"dubbed_audio_{task_id}.wav")
+        dubbed_audio = dubbed if os.path.isfile(dubbed) else None
+
+        burn = _as_bool(self.config.get('COMPOSITE_BURN_SUBTITLE', True))
+        srt = str(task.get('subtitle_path_translated') or '').strip()
+        subtitle_srt = srt if (burn and srt and os.path.isfile(srt)) else None
+
+        pad_px = _as_int(self.config.get('COMPOSITE_DELOGO_PAD_PX', 6), 6, minimum=0)
+        max_seg = _as_int(self.config.get('COMPOSITE_MAX_DELOGO_SEGMENTS', 40), 40, minimum=1)
+        timeout = _as_int(self.config.get('COMPOSITE_TIMEOUT_SECONDS', 10800), 10800, minimum=60)
+
+        ffmpeg_bin = get_ffmpeg_path(logger=task_logger)
+        if not ffmpeg_bin or not os.path.exists(ffmpeg_bin):
+            task_logger.warning("未找到 ffmpeg,跳过成片合成")
+            return False
+
+        out_path = os.path.join(task_dir, f"remastered_{task_id}.mp4")
+
+        prev_status = task.get('status')
+        update_task(task_id, status=TASK_STATES['COMPOSITING'])
+        task_logger.info(
+            f"重制管线:成片合成(delogo={len(ocr_segments)}段/配音={bool(dubbed_audio)}/"
+            f"字幕={bool(subtitle_srt)}) → {out_path}"
+        )
+
+        ok, res = run_composite(
+            ffmpeg_bin=ffmpeg_bin, input_video=video_path, output_video=out_path,
+            ocr_segments=ocr_segments, video_width=vw, video_height=vh,
+            dubbed_audio=dubbed_audio, subtitle_srt=subtitle_srt,
+            pad_px=pad_px, max_delogo_segments=max_seg, timeout=timeout,
+            logger=task_logger,
+        )
+        if ok:
+            # skipped=True 表示无可合成层:不改 video_path_local
+            if isinstance(res, dict) and res.get("skipped"):
+                update_task(task_id, composite_warning_message=None, status=prev_status)
+                task_logger.info(f"成片合成跳过(无可合成层): {res}")
+                return True
+            update_task(task_id, video_path_local=out_path,
+                        composite_warning_message=None, status=prev_status)
+            task_logger.info(f"成片合成完成: {res}")
+            return True
+        task_logger.error(f"成片合成失败: {res}")
+        update_task(task_id, composite_warning_message=f"composite: {res}", status=prev_status)
         return False
 
     def _translate_subtitle(self, task_id, task_logger, embed_in_video_override=None):
