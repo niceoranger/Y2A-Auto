@@ -92,6 +92,15 @@ DEFAULT_CONFIG = {
     "DEMUCS_DEVICE": "mps",               # Apple Silicon 加速, runner 内 CPU 兜底
     "DEMUCS_STEMS": 2,                    # 2-stem: vocals / no_vocals
     "DEMUCS_TIMEOUT_SECONDS": 7200,       # 长视频分离超时 2h
+    # AI 重制管线——XTTSv2 + RubberBand 配音(复用 REMASTER 总开关)
+    "DUB_PYTHON": "/Users/mac/asr-venv/bin/python",
+    "DUB_RUNNER": "modules/dub_runner.py",
+    "DUB_XTTS_MODEL": "tts_models/multilingual/multi-dataset/xtts_v2",
+    "DUB_SPEAKER": "Ana Florence",       # XTTS 内置声线
+    "DUB_LANGUAGE": "zh",
+    "DUB_DEVICE": "cpu",                 # XTTS 自定义算子不支持 MPS
+    "DUB_MAX_TEMPO": 1.5,                # RubberBand 最大加速倍率
+    "DUB_TIMEOUT_SECONDS": 14400,        # 4h;CPU 配音慢
     # 多选投稿平台列表(新):如 ["bilibili","douyin"]。空列表视为 ["acfun"]
     "UPLOAD_TARGETS": ["acfun"],
     # social-auto-upload 集成

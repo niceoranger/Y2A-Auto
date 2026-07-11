@@ -69,11 +69,15 @@ Expected: `rubberband` 在 PATH；help 含 `-t` / `--time` 与 formant/crisp 相
 - [ ] **Step 2: asr-venv 安装 coqui-tts**
 
 ```bash
-/Users/mac/asr-venv/bin/pip install -U coqui-tts
+/Users/mac/asr-venv/bin/pip install -U coqui-tts pypinyin
 # 若包名不可用，试：pip install -U TTS
 /Users/mac/asr-venv/bin/python -c "from TTS.api import TTS; print('TTS OK')"
 ```
 Expected: import 成功；torch 仍为 2.8.x 不被严重降级。
+
+**注意 `pypinyin` 是中文硬依赖**：XTTS 中文合成走 `chinese_transliterate`，缺 `pypinyin` 会在 `tts_to_file(..., language="zh")` 时 `ImportError: Chinese requires: pypinyin`。冒烟实测踩过，必须一并装。
+
+**注意 CPML 非交互接受**：XTTSv2 下载/加载前需 `export COQUI_TOS_AGREED=1`，否则会 `input()` 卡死。runner 内已 `os.environ.setdefault("COQUI_TOS_AGREED", "1")`，环境准备脚本同样要 export。
 
 - [ ] **Step 3: 触发 XTTSv2 权重下载（~2GB）**
 

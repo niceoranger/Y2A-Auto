@@ -341,6 +341,7 @@ TASK_STATES = {
     'DOWNLOADED': 'downloaded',           # 下载完成
     'ASR_TRANSCRIBING': 'asr_transcribing',  # 语音转写中
     'AUDIO_SEPARATING': 'audio_separating',  # 音轨分离中(Demucs)
+    'DUBBING': 'dubbing',                    # 配音合成中(XTTS+RubberBand)
     'TRANSLATING_SUBTITLE': 'translating_subtitle',  # 正在翻译字幕
     'ENCODING_VIDEO': 'encoding_video',   # 正在转码视频
     'TRANSLATING': 'translating',         # 正在翻译
@@ -366,6 +367,7 @@ PROCESSING_STATES = [
     TASK_STATES['DOWNLOADED'],
     TASK_STATES['ASR_TRANSCRIBING'],
     TASK_STATES['AUDIO_SEPARATING'],
+    TASK_STATES['DUBBING'],
     TASK_STATES['TRANSLATING_SUBTITLE'],
     TASK_STATES['ENCODING_VIDEO'],
     TASK_STATES['UPLOADING'],
@@ -385,6 +387,7 @@ PIPELINE_STAGE_DOWNLOAD_VIDEO = 'download_video'
 PIPELINE_STAGE_REMASTER_ASR = 'remaster_asr'
 PIPELINE_STAGE_REMASTER_DEMUCS = 'remaster_demucs'
 PIPELINE_STAGE_TRANSLATE_SUBTITLE = 'translate_subtitle'
+PIPELINE_STAGE_REMASTER_DUB = 'remaster_dub'
 PIPELINE_STAGE_UPLOAD_TO_ACFUN = 'upload_to_acfun'
 
 PIPELINE_STAGE_ORDER = [
@@ -397,6 +400,7 @@ PIPELINE_STAGE_ORDER = [
     PIPELINE_STAGE_REMASTER_ASR,
     PIPELINE_STAGE_REMASTER_DEMUCS,
     PIPELINE_STAGE_TRANSLATE_SUBTITLE,
+    PIPELINE_STAGE_REMASTER_DUB,
     PIPELINE_STAGE_UPLOAD_TO_ACFUN,
 ]
 
@@ -1046,7 +1050,8 @@ def init_db():
         bilibili_upload_response TEXT,
         asr_warning_message TEXT,  -- ASR/VAD阶段的非致命警告（如vad_low_coverage），不影响上传流程
         subtitle_warning_message TEXT,  -- 字幕处理阶段的非致命警告（如烧录失败），不影响上传流程
-        demucs_warning_message TEXT  -- Demucs 音轨分离阶段的非致命警告，不影响上传流程
+        demucs_warning_message TEXT,  -- Demucs 音轨分离阶段的非致命警告，不影响上传流程
+        dub_warning_message TEXT  -- 配音阶段的非致命警告，不影响上传流程
     )
     ''')
     
@@ -1302,6 +1307,13 @@ def init_db():
             logger.info("数据库升级：添加demucs_warning_message字段")
             conn.commit()
 
+        cursor.execute("PRAGMA table_info(tasks)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'dub_warning_message' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN dub_warning_message TEXT")
+            logger.info("数据库升级：添加dub_warning_message字段")
+            conn.commit()
+
         # 数据迁移：将 error_message 中纯 ASR/VAD 警告 token 挪至 asr_warning_message，清空 error_message
         cursor.execute(
             "SELECT 1 FROM schema_migrations WHERE migration_key = ? LIMIT 1",
@@ -1502,6 +1514,7 @@ def update_task(task_id, silent=False, **kwargs):
         'asr_warning_message': 'asr_warning_message = ?',
         'subtitle_warning_message': 'subtitle_warning_message = ?',
         'demucs_warning_message': 'demucs_warning_message = ?',
+        'dub_warning_message': 'dub_warning_message = ?',
         'sau_upload_responses': 'sau_upload_responses = ?',
         'upload_targets': 'upload_targets = ?',
     }
@@ -2494,6 +2507,18 @@ class TaskProcessor:
                         task_logger.error("字幕处理失败，继续执行后续步骤")
                 _raise_if_cancelled(task_id, task_logger)
 
+            # 5b. AI 重制配音(依赖翻译字幕 + Demucs no_vocals; 独立门控)
+            if PIPELINE_STAGE_TRANSLATE_SUBTITLE in completed_stages and \
+                    PIPELINE_STAGE_REMASTER_DUB not in completed_stages and \
+                    _as_bool(self.config.get('REMASTER_PIPELINE_ENABLED', False)):
+                try:
+                    self._run_remaster_dub(task_id, task_logger)
+                except Exception as e:
+                    task_logger.error(f"重制配音异常: {e}")
+                completed_stages = _mark_stage_done(
+                    task_id, completed_stages, PIPELINE_STAGE_REMASTER_DUB
+                )
+
             # 6. 上传
             if self.config.get('AUTO_MODE_ENABLED', False):
                 # 若已有上传响应，避免重复上传
@@ -3166,6 +3191,90 @@ class TaskProcessor:
             return True
         task_logger.error(f"音轨分离失败: {res}")
         update_task(task_id, demucs_warning_message=f"demucs: {res}", status=prev_status)
+        return False
+
+    def _run_remaster_dub(self, task_id, task_logger):
+        """AI 重制管线:XTTSv2 固定声线配音 + RubberBand 对齐,产出 dubbed_audio wav。
+
+        只产中间产物落盘,不写任何下游业务字段;供未来 FFmpeg 合成子项目消费。
+        软失败:失败不阻断上传。
+        """
+        from modules.dub_generator import DubGenerator
+
+        task = get_task(task_id)
+        if not task:
+            task_logger.error("任务不存在")
+            return False
+
+        srt_path = str(task.get("subtitle_path_translated") or "").strip()
+        if not srt_path or not os.path.exists(srt_path):
+            task_logger.warning("翻译字幕缺失,跳过配音")
+            return False
+
+        task_dir = os.path.join(DOWNLOADS_DIR, task_id)
+        no_vocals = os.path.join(task_dir, f"demucs_no_vocals_{task_id}.wav")
+        if not os.path.exists(no_vocals):
+            task_logger.warning(f"Demucs 背景音缺失({no_vocals}),跳过配音")
+            return False
+
+        python_bin = str(self.config.get("DUB_PYTHON", "") or "").strip()
+        runner_path = str(self.config.get("DUB_RUNNER", "modules/dub_runner.py") or "").strip()
+        if not runner_path or not os.path.isabs(runner_path):
+            runner_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                runner_path,
+            )
+
+        os.makedirs(task_dir, exist_ok=True)
+        out_wav = os.path.join(task_dir, f"dubbed_audio_{task_id}.wav")
+
+        # 配置解析放在 status 翻转之前,避免非法 DUB_MAX_TEMPO 导致任务卡在 DUBBING
+        try:
+            max_tempo = float(self.config.get("DUB_MAX_TEMPO", 1.5) or 1.5)
+            if max_tempo <= 0:
+                max_tempo = 1.5
+        except (TypeError, ValueError):
+            max_tempo = 1.5
+        speaker = str(self.config.get("DUB_SPEAKER", "Ana Florence") or "Ana Florence")
+        language = str(self.config.get("DUB_LANGUAGE", "zh") or "zh")
+        device = str(self.config.get("DUB_DEVICE", "cpu") or "cpu")
+        model = str(
+            self.config.get(
+                "DUB_XTTS_MODEL",
+                "tts_models/multilingual/multi-dataset/xtts_v2",
+            )
+            or "tts_models/multilingual/multi-dataset/xtts_v2"
+        )
+        timeout = _as_int(self.config.get("DUB_TIMEOUT_SECONDS", 14400), 14400, minimum=60)
+
+        prev_status = task.get("status")
+        update_task(task_id, status=TASK_STATES["DUBBING"])
+        task_logger.info(
+            f"重制管线:调用配音(XTTS/{speaker}/{device}),输出 {out_wav}"
+        )
+
+        gen = DubGenerator(python_bin=python_bin, runner_path=runner_path)
+        gen.logger = task_logger
+        ok, res = gen.generate(
+            translated_srt_path=srt_path,
+            no_vocals_wav=no_vocals,
+            output_path=out_wav,
+            task_id=task_id,
+            speaker=speaker,
+            language=language,
+            device=device,
+            max_tempo=max_tempo,
+            model=model,
+            progress_callback=lambda t: task_logger.info(f"[dub] {t}"),
+            timeout=timeout,
+        )
+        if ok:
+            # 只产中间产物,不写视频/字幕路径。见 dub design spec §1。
+            update_task(task_id, dub_warning_message=None, status=prev_status)
+            task_logger.info(f"配音完成: {res}")
+            return True
+        task_logger.error(f"配音失败: {res}")
+        update_task(task_id, dub_warning_message=f"dub: {res}", status=prev_status)
         return False
 
     def _translate_subtitle(self, task_id, task_logger, embed_in_video_override=None):

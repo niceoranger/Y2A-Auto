@@ -27,7 +27,7 @@
 |----|------|------|
 | TTS | XTTSv2（coqui-tts），CPU | 质量最高；用户明确选此 |
 | 声线 | 固定内置 speaker（默认可配置，如 `Ana Florence`） | 简单可靠；不依赖原人声质量 |
-| 变速 | RubberBand CLI（`brew install rubberband`） | 保留共振峰；用户质量优先 |
+| 变速 | RubberBand CLI（`brew install rubberband`） | 高质量时间拉伸（crispness 5）；用户质量优先 |
 | 总开关 | 复用 `REMASTER_PIPELINE_ENABLED` | 与 ASR/Demucs 一致 |
 | 产物 | `downloads/<task_id>/dubbed_audio_<task_id>.wav` | 中间产物，等 FFmpeg 合成消费 |
 
@@ -93,10 +93,12 @@ modules/dub_runner.py
 ### 4.3 RubberBand 调用
 
 ```
-rubberband -t <tempo> -c 1 <in.wav> <out.wav>
+rubberband -t <time_ratio> -c 5 <in.wav> <out.wav>
 ```
 
-`-c 1`：保留共振峰，适合人声。`tempo` 为相对倍率（>1 加速）。
+`-t <time_ratio>`：输出时长 = 输入时长 × time_ratio（`<1` 加速缩短）。
+`-c 5`：crispness 默认档（语音清晰）。注意 `-c` 是 crispness 不是 formant；formant 旗标是 `-F`（变调时才有意义）。
+本实现只做纯时间拉伸，不使用 `-F`。
 
 ### 4.4 stdout 协议 / 退出码
 
