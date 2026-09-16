@@ -3182,6 +3182,19 @@ class TaskProcessor:
             # 后续翻译/合成子项目再刻意接入这份 SRT。见 spec §8。
             update_task(task_id, asr_warning_message=None, status=prev_status)
             task_logger.info(f"重制 ASR 完成(word-level SRT: {out_srt}): {res}")
+            # 长 cue(整段话)拆分为可读短句：规则版(句界切分+比例时长)。
+            # AI 分段模块需字级时间戳，whisperx 段级 SRT 会基线回退不拆分且太慢(22min/条)，弃用。
+            try:
+                if _as_bool(self.config.get('AI_SEGMENTATION_ENABLED', False)):
+                    from modules.srt_cue_splitter import split_long_cues
+                    changed, orig_n, new_n = split_long_cues(
+                        out_srt,
+                        max_duration_s=float(self.config.get('AI_SEGMENTATION_MAX_CUE_DURATION_S', 5.5) or 5.5),
+                        logger=task_logger)
+                    if changed:
+                        task_logger.info(f"字幕长cue拆分: {orig_n} → {new_n} 条")
+            except Exception as seg_err:
+                task_logger.warning(f"长cue拆分异常(不阻断): {seg_err}")
             return True
         task_logger.error(f"重制 ASR 失败: {res}")
         update_task(task_id, asr_warning_message=f"whisperx: {res}", status=prev_status)
@@ -3447,6 +3460,13 @@ class TaskProcessor:
         srt = str(task.get('subtitle_path_translated') or '').strip()
         subtitle_srt = srt if (burn and srt and os.path.isfile(srt)) else None
 
+        # 输入若已是带字幕文件(翻译阶段已烧录),composite 不得再叠烧;
+        # 且输出名保留 _with_subtitle 后缀,让上传前检查复用而非补烧。
+        # (2026-09-10 修复三重烧录: translate烧#1 + composite烧#2 + 上传前补烧#3)
+        input_already_subtitled = os.path.splitext(os.path.basename(video_path))[0].endswith('_with_subtitle')
+        if input_already_subtitled:
+            subtitle_srt = None
+
         pad_px = _as_int(self.config.get('COMPOSITE_DELOGO_PAD_PX', 6), 6, minimum=0)
         max_seg = _as_int(self.config.get('COMPOSITE_MAX_DELOGO_SEGMENTS', 40), 40, minimum=1)
         timeout = _as_int(self.config.get('COMPOSITE_TIMEOUT_SECONDS', 10800), 10800, minimum=60)
@@ -3456,7 +3476,8 @@ class TaskProcessor:
             task_logger.warning("未找到 ffmpeg,跳过成片合成")
             return False
 
-        out_path = os.path.join(task_dir, f"remastered_{task_id}.mp4")
+        out_name = f"remastered_{task_id}{'_with_subtitle' if input_already_subtitled else ''}.mp4"
+        out_path = os.path.join(task_dir, out_name)
 
         prev_status = task.get('status')
         update_task(task_id, status=TASK_STATES['COMPOSITING'])
@@ -4000,35 +4021,34 @@ class TaskProcessor:
         'MarginL': 96.0,
         'MarginR': 96.0,
         'Alignment': 2,
-        # BorderStyle=4 gives a modern rounded-rectangle background box
-        # (supported by libass/FFmpeg), which is the dominant look for
-        # streaming/online-video captions.
-        # BorderStyle=1 with a thick, dark semi-transparent outline.
-        # This gives the clean "no-box" streaming caption look while keeping
-        # text readable on bright/complex backgrounds.
-        'BorderStyle': 1,
+        # 2026-09-12 用户需求: 黄底黑字字幕(经典高可读样式)。BorderStyle=3:
+        # OutlineColour 即底块颜色(不透明纯黄 &H0000FFFF), Outline 为块内边距。
+        'BorderStyle': 3,
+        'Outline': 6.0,
+        'Shadow': 0.0,
         'Bold': 1,
-        'PrimaryColour': '&H00FFFFFF',
-        'SecondaryColour': '&H00FFFFFF',
-        'OutlineColour': '&HB2000000',
+        'PrimaryColour': '&H00000000',
+        'SecondaryColour': '&H00000000',
+        'OutlineColour': '&H0000FFFF',
         'BackColour': '&H00000000',
     }
     _ASS_LANDSCAPE_FONT_SIZE_ANCHORS = (
-        (720.0, 48.0),
-        (1080.0, 54.0),
-        (1440.0, 68.0),
-        (2160.0, 102.0),
+        # 2026-09-15 统一屏高比例；同日应需求放大: 5% → 6.5%
+        (720.0, 47.0),
+        (1080.0, 70.0),
+        (1440.0, 93.0),
+        (2160.0, 140.0),
     )
     _ASS_PORTRAIT_FONT_SIZE_ANCHORS = (
-        (720.0, 44.0),
-        (1280.0, 54.0),
-        (1920.0, 68.0),
-        (2560.0, 76.0),
+        (720.0, 47.0),
+        (1280.0, 83.0),
+        (1920.0, 125.0),
+        (2560.0, 166.0),
     )
     _ASS_LANDSCAPE_MARGIN_V_ANCHORS = (
-        (720.0, 56.0),
+        (720.0, 41.0),
         (1080.0, 62.0),
-        (1440.0, 82.0),
+        (1440.0, 83.0),
         (2160.0, 124.0),
     )
     _ASS_PORTRAIT_MARGIN_V_ANCHORS = (
@@ -4038,7 +4058,7 @@ class TaskProcessor:
         (2560.0, 292.0),
     )
     # Landscape captions use generous side margins to avoid crowding the
-    # edges, but still keep enough width to stay single-line after scaling.
+    # edges, while leaving enough width for single-line cues at base font.
     _ASS_LANDSCAPE_SIDE_MARGIN_RATIO = 0.025
     _ASS_LANDSCAPE_SIDE_MARGIN_MIN = 32.0
     _ASS_LANDSCAPE_SIDE_MARGIN_MAX = 80.0
@@ -4046,9 +4066,8 @@ class TaskProcessor:
     _ASS_PORTRAIT_SIDE_MARGIN_MIN = 82.0
     _ASS_PORTRAIT_SIDE_MARGIN_MAX = 156.0
     _ASS_LANDSCAPE_LAYOUT_DENSITY = 0.93
-    # 单行优先模式允许密度略 >1.0：font_size 按等宽近似估算偏保守，略微放宽
-    # 以更充分地利用 _ASS_SAFE_WIDTH_RATIO(0.98) 已留出的安全宽度。实际单行
-    # 字符上限由下游 _clamp(18, 28) 钳制，不会真正溢出可用宽度。
+    # 单行优先的"仍算单行"阈值密度。宽度安全检查(_check_ass_lines_width_safety)
+    # 仍是最终裁决:超过安全宽度的 cue 会折成两行(恒定字号,不再逐条缩小)。
     _ASS_LANDSCAPE_SINGLE_LINE_DENSITY = 1.04
     _ASS_LANDSCAPE_SINGLE_LINE_LIMIT_MIN = 28.0
     _ASS_LANDSCAPE_SINGLE_LINE_LIMIT_MAX = 38.0
@@ -4056,14 +4075,7 @@ class TaskProcessor:
     # Allow text to use almost the full usable width. A small safety margin
     # remains so descenders/outlines do not touch the screen edges.
     _ASS_SAFE_WIDTH_RATIO = 0.98
-    _ASS_OVERRIDE_FONT_SIZE_RATIO_MIN = 0.60
-    # Allow aggressive down-scaling for single-line priority. Landscape
-    # captions are required to stay on one line, so we shrink the font as
-    # far as the global override minimum permits before accepting overflow.
-    _ASS_SINGLE_LINE_FONT_SCALE_MIN = 0.60
-    _ASS_OVERRIDE_FONT_SIZE_MIN = 32.0
     _ASS_HARD_WRAP_MIN_LINE_LENGTH = 8
-    _ASS_PORTRAIT_RESCUE_LINE_LENGTH_MAX = 16.0
     # Thicker outline for the BorderStyle=4 rounded box, plus a soft shadow.
     _ASS_OUTLINE_RATIO = 0.075
     _ASS_OUTLINE_MIN = 2.2
@@ -4071,9 +4083,6 @@ class TaskProcessor:
     _ASS_SHADOW_RATIO = 0.025
     _ASS_SHADOW_MIN = 1.0
     _ASS_SHADOW_MAX = 2.2
-    _ASS_OVERRIDE_OUTLINE_RATIO = 0.045
-    _ASS_OVERRIDE_OUTLINE_MIN = 1.5
-    _ASS_OVERRIDE_OUTLINE_MAX = 3.0
     _STREAMING_SRT_TEMPLATE_HEIGHTS = (720, 1080, 1440, 2160)
     _STREAMING_SRT_STYLE_TEMPLATES = {
         720: {
@@ -4516,7 +4525,8 @@ class TaskProcessor:
         return r'\N'.join(escaped_lines)
 
     @classmethod
-    def _compose_ass_dialogue_text(cls, lines, override_font_size=None):
+    def _compose_ass_dialogue_text(cls, lines):
+        # 2026-09-16 恒定字号: 不再支持逐条 \fs 覆盖,Dialogue 文本一律使用样式基准字号。
         escaped_lines = [
             cls._escape_ass_text_line(line)
             for line in (lines or [])
@@ -4524,16 +4534,7 @@ class TaskProcessor:
         ]
         if not escaped_lines:
             return ''
-        payload = r'\N'.join(escaped_lines)
-        if override_font_size is None:
-            return payload
-        try:
-            override_font_size = int(round(float(override_font_size)))
-        except Exception:
-            override_font_size = 0
-        if override_font_size <= 0:
-            return payload
-        return f"{{\\fs{override_font_size}}}{payload}"
+        return r'\N'.join(escaped_lines)
 
     @classmethod
     def _build_streaming_ass_style(cls, video_width, video_height):
@@ -4633,7 +4634,12 @@ class TaskProcessor:
         template.update({
             'FontName': cls._sanitize_ass_font_name(font_family),
             'Alignment': 2,
-            'BorderStyle': 1,
+            # BorderStyle=3: 实底色块字幕（黄底黑字，与主烧录模板一致）
+            'BorderStyle': 3,
+            'Outline': 2.0,
+            'Shadow': 0.0,
+            'PrimaryColour': '&H00000000',
+            'OutlineColour': '&H0000FFFF',
             'OriginalSize': f"{width}x{height}",
             'TemplateHeight': template_height,
         })
@@ -4652,6 +4658,8 @@ class TaskProcessor:
             f"MarginV={int(style['MarginV'])}",
             f"Alignment={style['Alignment']}",
             f"BorderStyle={style['BorderStyle']}",
+            f"PrimaryColour={style['PrimaryColour']}",
+            f"OutlineColour={style['OutlineColour']}",
         ]
         payload = ','.join(entries).replace("'", r"\'")
         return f"force_style='{payload}'"
@@ -4884,11 +4892,10 @@ class TaskProcessor:
             # but the partitioner still prefers fewer balanced lines.
             max_lines = 5
         else:
-            # Hard-coded to 1 line for landscape captions. The single-line
-            # priority logic will scale the font down when needed; only if the
-            # text still does not fit will an overflow warning be emitted.
+            # 2026-09-16 恒定字号策略: 横屏允许最多两行平衡拆分,字号恒定不再
+            # 逐条缩小(逐条缩字号曾导致同视频字幕忽大忽小)。
             max_line_length = int(cls._clamp(max_line_length, 18.0, 22.0))
-            max_lines = 1
+            max_lines = 2
         return max_line_length, max_lines
 
     @staticmethod
@@ -5052,27 +5059,6 @@ class TaskProcessor:
         )
 
     @classmethod
-    def _can_lines_fit_with_font_override(cls, lines, usable_width, font_size, outline, shadow):
-        fits, _, _, _ = cls._check_ass_lines_width_safety(
-            lines,
-            usable_width,
-            font_size,
-            outline,
-            shadow,
-        )
-        if fits:
-            return True
-
-        _, override_fits = cls._resolve_safe_override_font_size(
-            lines,
-            usable_width,
-            font_size,
-            outline,
-            shadow,
-        )
-        return override_fits
-
-    @classmethod
     def _score_partition_line(cls, line, target_units, max_line_length, *, is_last):
         stripped = str(line or '').strip()
         if not stripped:
@@ -5200,66 +5186,6 @@ class TaskProcessor:
         return best_lines
 
     @classmethod
-    def _find_portrait_rescue_lines(
-        cls,
-        normalized,
-        *,
-        max_line_length,
-        usable_width,
-        font_size,
-        outline,
-        shadow,
-    ):
-        rescue_font_size = max(
-            float(cls._ASS_OVERRIDE_FONT_SIZE_MIN),
-            float(font_size) * float(cls._ASS_OVERRIDE_FONT_SIZE_RATIO_MIN),
-        )
-        rescue_outline = cls._clamp(
-            rescue_font_size * cls._ASS_OVERRIDE_OUTLINE_RATIO,
-            cls._ASS_OVERRIDE_OUTLINE_MIN,
-            cls._ASS_OVERRIDE_OUTLINE_MAX,
-        )
-        rescue_shadow = cls._clamp(rescue_font_size * 0.016, 0.7, 1.35)
-        rescue_line_length = int(round(
-            cls._estimate_safe_line_units(
-                usable_width,
-                rescue_font_size,
-                rescue_outline,
-                rescue_shadow,
-            )
-        ))
-        rescue_line_length = int(cls._clamp(
-            rescue_line_length,
-            max_line_length + 1,
-            cls._ASS_PORTRAIT_RESCUE_LINE_LENGTH_MAX,
-        ))
-
-        best_lines = []
-        for line_count in (4, 5):
-            candidate_lines = cls._build_optimal_multiline_partition(
-                normalized,
-                max_line_length=rescue_line_length,
-                min_lines=line_count,
-                max_lines=line_count,
-            )
-            if not candidate_lines:
-                continue
-
-            if cls._can_lines_fit_with_font_override(
-                candidate_lines,
-                usable_width,
-                font_size,
-                outline,
-                shadow,
-            ):
-                return candidate_lines, True
-
-            if not best_lines:
-                best_lines = candidate_lines
-
-        return best_lines, False
-
-    @classmethod
     def _find_landscape_rescue_lines(
         cls,
         normalized,
@@ -5295,13 +5221,16 @@ class TaskProcessor:
             if not candidate_lines:
                 continue
 
-            if cls._can_lines_fit_with_font_override(
+            # 2026-09-16 恒定字号: 救援行必须以基准字号直接放得下(不再考虑
+            # 逐条缩小字号的"本可放下"语义)。
+            fits, _, _, _ = cls._check_ass_lines_width_safety(
                 candidate_lines,
                 usable_width,
                 font_size,
                 outline,
                 shadow,
-            ):
+            )
+            if fits:
                 return candidate_lines, True
 
             if not best_lines:
@@ -5375,130 +5304,6 @@ class TaskProcessor:
             cls._wrap_subtitle_segment_greedily(merged_text, max_line_length),
             max_lines,
         )
-
-    @classmethod
-    def _resolve_safe_override_font_size(cls, lines, usable_width, font_size, outline, shadow):
-        fits, max_width, safe_width, _ = cls._check_ass_lines_width_safety(
-            lines,
-            usable_width,
-            font_size,
-            outline,
-            shadow,
-        )
-        if fits or max_width <= 0:
-            return None, True
-
-        min_font_size = max(
-            float(cls._ASS_OVERRIDE_FONT_SIZE_MIN),
-            float(font_size) * float(cls._ASS_OVERRIDE_FONT_SIZE_RATIO_MIN),
-        )
-        target_font_size = max(
-            min_font_size,
-            float(font_size) * (safe_width / max_width),
-        )
-        target_font_size = min(float(font_size), target_font_size)
-        target_font_size = float(int(max(1, round(target_font_size))))
-        if target_font_size >= float(font_size):
-            return None, False
-
-        adjusted_outline = cls._clamp(
-            target_font_size * cls._ASS_OVERRIDE_OUTLINE_RATIO,
-            cls._ASS_OVERRIDE_OUTLINE_MIN,
-            cls._ASS_OVERRIDE_OUTLINE_MAX,
-        )
-        adjusted_shadow = cls._clamp(target_font_size * 0.016, 0.7, 1.35)
-        adjusted_fits, _, _, _ = cls._check_ass_lines_width_safety(
-            lines,
-            usable_width,
-            target_font_size,
-            adjusted_outline,
-            adjusted_shadow,
-        )
-        return target_font_size, adjusted_fits
-
-    @classmethod
-    def _resolve_single_line_scaled_font(
-        cls,
-        text,
-        usable_width,
-        font_size,
-        outline,
-        shadow,
-        *,
-        min_scale,
-    ):
-        """Find the largest font size >= min_scale*font_size that keeps *text* on one line.
-
-        Uses binary search so the scale reduction is as small as possible,
-        keeping the subtitle single-line without an aggressive visual shrink.
-
-        Returns (scaled_font_size, scaled_outline, scaled_shadow) if a fit is found,
-        otherwise (None, None, None).
-        """
-        single_line = [str(text or '').strip()]
-        if not single_line[0]:
-            return None, None, None
-
-        min_allowed_font = max(
-            float(cls._ASS_OVERRIDE_FONT_SIZE_MIN),
-            float(font_size) * float(cls._ASS_OVERRIDE_FONT_SIZE_RATIO_MIN),
-            float(font_size) * float(min_scale),
-        )
-        if min_allowed_font >= float(font_size):
-            return None, None, None
-
-        def _fits_at_size(size):
-            test_outline = cls._clamp(
-                size * cls._ASS_OUTLINE_RATIO,
-                cls._ASS_OUTLINE_MIN,
-                cls._ASS_OUTLINE_MAX,
-            )
-            test_shadow = cls._clamp(
-                size * cls._ASS_SHADOW_RATIO,
-                cls._ASS_SHADOW_MIN,
-                cls._ASS_SHADOW_MAX,
-            )
-            fits, _, _, _ = cls._check_ass_lines_width_safety(
-                single_line,
-                usable_width,
-                size,
-                test_outline,
-                test_shadow,
-            )
-            return fits
-
-        lo = min_allowed_font
-        hi = float(font_size)
-        if _fits_at_size(hi):
-            return None, None, None
-        if not _fits_at_size(lo):
-            return None, None, None
-
-        best_size = lo
-        for _ in range(12):
-            mid = (lo + hi) / 2.0
-            if _fits_at_size(mid):
-                best_size = mid
-                lo = mid
-            else:
-                hi = mid
-
-        best_size = float(int(round(best_size)))
-        best_size = min(best_size, font_size - 1.0)
-        if best_size < min_allowed_font:
-            return None, None, None
-
-        best_outline = cls._clamp(
-            best_size * cls._ASS_OUTLINE_RATIO,
-            cls._ASS_OUTLINE_MIN,
-            cls._ASS_OUTLINE_MAX,
-        )
-        best_shadow = cls._clamp(
-            best_size * cls._ASS_SHADOW_RATIO,
-            cls._ASS_SHADOW_MIN,
-            cls._ASS_SHADOW_MAX,
-        )
-        return best_size, best_outline, best_shadow
 
     @staticmethod
     def _is_preferred_wrap_boundary(char):
@@ -5694,6 +5499,31 @@ class TaskProcessor:
         )
         return any(left.endswith(prefix) and right.startswith(suffix) for prefix, suffix in broken_pairs)
 
+    # 行首禁则: 这些收尾标点不允许出现在行首(中文排版规范)。
+    _LINE_START_FORBIDDEN_CHARS = '.,!?;:)]}，。！？；：、…】）》」』”’'
+
+    @classmethod
+    def _enforce_line_start_punctuation_rules(cls, wrapped_lines):
+        """行首禁则后处理: 若某行以收尾标点开头,把上一行末字符移下来连带标点。
+
+        只移动字符、不合并行,保证每行仍在贪心行宽上限内(上一行变短、下一行
+        长度不变时例外为由标点开头的情况,移动后下一行首字符为普通字符)。
+        """
+        lines = [str(line) for line in (wrapped_lines or [])]
+        for i in range(1, len(lines)):
+            while (
+                lines[i]
+                and lines[i][:1] in cls._LINE_START_FORBIDDEN_CHARS
+                and lines[i - 1]
+            ):
+                moved = lines[i - 1][-1:]
+                stripped_prev = lines[i - 1][:-1].rstrip()
+                if not stripped_prev:
+                    break
+                lines[i - 1] = stripped_prev
+                lines[i] = moved + lines[i]
+        return [line for line in lines if line]
+
     @classmethod
     def _wrap_subtitle_segment_greedily(cls, segment, max_line_length):
         wrapped_lines = []
@@ -5741,7 +5571,7 @@ class TaskProcessor:
         line = ''.join(chars).strip()
         if line:
             wrapped_lines.append(line)
-        return wrapped_lines
+        return cls._enforce_line_start_punctuation_rules(wrapped_lines)
 
     @classmethod
     def _find_balanced_wrap_index(cls, segment, max_line_length):
@@ -5849,12 +5679,10 @@ class TaskProcessor:
         return_meta=False,
         *,
         prefer_single_line=True,
-        single_line_min_font_scale=None,
     ):
         # Normalize internal line breaks so that a single SRT cue is always
-        # treated as one logical line. The ASS burn-in stage decides whether
-        # to scale the font or emit an overflow warning; it never falls back
-        # to multi-line wrapping for landscape captions.
+        # treated as one logical line. 2026-09-16 恒定字号: 单行优先仅指"放得下
+        # 就单行";放不下时按布局上限(横屏两行)平衡拆分,绝不逐条缩小字号。
         normalized = cls._merge_subtitle_text_parts(
             str(text or '').replace('\r\n', '\n').replace('\r', '\n').split('\n')
         )
@@ -5882,13 +5710,9 @@ class TaskProcessor:
             cls._ASS_LANDSCAPE_SINGLE_LINE_LIMIT_MAX,
         ))
 
-        # Single-line priority: keep the whole cue on one line if it fits,
-        # optionally scaling the font down within the configured range.
+        # Single-line priority: keep the whole cue on one line if it fits at
+        # the base font size; otherwise wrap at constant font size.
         if prefer_single_line:
-            min_scale = max(
-                cls._ASS_SINGLE_LINE_FONT_SCALE_MIN,
-                float(single_line_min_font_scale or cls._ASS_SINGLE_LINE_FONT_SCALE_MIN),
-            )
             single_line = [normalized]
             single_fits, _, _, _ = cls._check_ass_lines_width_safety(
                 single_line,
@@ -5900,22 +5724,6 @@ class TaskProcessor:
             if single_fits:
                 wrapped_lines = single_line
             else:
-                scaled_font_size, scaled_outline, scaled_shadow = cls._resolve_single_line_scaled_font(
-                    normalized,
-                    usable_width,
-                    font_size,
-                    outline,
-                    shadow,
-                    min_scale=min_scale,
-                )
-                if scaled_font_size is not None and scaled_font_size < font_size:
-                    wrapped_lines = single_line
-                    wrap_meta['font_override'] = int(round(scaled_font_size))
-                    ass_text = cls._compose_ass_dialogue_text(
-                        wrapped_lines,
-                        override_font_size=wrap_meta['font_override'],
-                    )
-                    return (ass_text, wrap_meta) if return_meta else ass_text
                 wrapped_lines = cls._build_wrapped_lines_for_ass(
                     normalized,
                     is_portrait=is_portrait,
@@ -5957,37 +5765,29 @@ class TaskProcessor:
                 wrap_meta['forced_wrap'] = candidate_lines != wrapped_lines
             fits = hard_wrap_fits
 
-        if not fits and is_portrait and max_lines < 5:
-            portrait_rescue_lines, portrait_rescue_fits = cls._find_portrait_rescue_lines(
+        # 2026-09-16 恒定字号: 竖屏平衡拆分(≤max_lines 行)放不下时,退化为不限
+        # 行数的宽度安全贪心硬换行(块内也可断开)。这比交给 libass 自动换行更可控:
+        # 断点确定、每行都过宽度安全检查;只有不可拆的超长词才保留 overflow_warning。
+        if not fits and is_portrait and max_lines <= 5:
+            portrait_fallback_lines = cls._wrap_subtitle_segment_greedily(
                 normalized,
-                max_line_length=max_line_length,
-                usable_width=usable_width,
-                font_size=font_size,
-                outline=outline,
-                shadow=shadow,
+                max_line_length,
             )
-            if portrait_rescue_lines:
-                candidate_lines = portrait_rescue_lines
+            portrait_fallback_fits, _, _, _ = cls._check_ass_lines_width_safety(
+                portrait_fallback_lines,
+                usable_width,
+                font_size,
+                outline,
+                shadow,
+            )
+            if portrait_fallback_lines and portrait_fallback_fits:
+                candidate_lines = portrait_fallback_lines
                 wrap_meta['forced_wrap'] = True
-                fits = portrait_rescue_fits
-            elif not portrait_rescue_lines:
-                portrait_fallback_lines, portrait_fallback_fits = cls._find_safe_hard_wrap_lines(
-                    normalized,
-                    max_line_length=max(max_line_length, cls._ASS_HARD_WRAP_MIN_LINE_LENGTH),
-                    max_lines=5,
-                    usable_width=usable_width,
-                    font_size=font_size,
-                    outline=outline,
-                    shadow=shadow,
-                )
-                if portrait_fallback_lines:
-                    candidate_lines = portrait_fallback_lines
-                    wrap_meta['forced_wrap'] = True
-                    fits = portrait_fallback_fits
+                fits = True
 
-        # Landscape captions are hard-coded to a single line. Only attempt
-        # multi-line rescue fallbacks when the layout explicitly allows more
-        # than one line (e.g. caller passed prefer_single_line=False).
+        # Landscape rescue: only when the layout allows more than the current
+        # two lines would deeper fallbacks engage; max_lines<4 keeps this a
+        # bounded safety net rather than an open-ended wrap ladder.
         if not fits and not is_portrait and 1 < max_lines < 4:
             landscape_rescue_lines, landscape_rescue_fits = cls._find_landscape_rescue_lines(
                 normalized,
@@ -6031,23 +5831,13 @@ class TaskProcessor:
                     wrap_meta['forced_wrap'] = True
                     fits = deep_rescue_fits
 
-        override_font_size = None
-        if not fits and candidate_lines:
-            override_font_size, override_fits = cls._resolve_safe_override_font_size(
-                candidate_lines,
-                usable_width,
-                font_size,
-                outline,
-                shadow,
-            )
-            if override_font_size is not None:
-                wrap_meta['font_override'] = int(round(override_font_size))
-                fits = override_fits
-
+        # 2026-09-16 恒定字号: 逐条缩字号已彻底移除,Dialogue 一律使用样式基准
+        # 字号。放不下的 cue 依赖上方换行/救援链;残余超宽仅置 overflow_warning,
+        # 交给 libass 自动换行(WrapStyle)。
         if not fits and candidate_lines:
             wrap_meta['overflow_warning'] = True
 
-        ass_text = cls._compose_ass_dialogue_text(candidate_lines, override_font_size=override_font_size)
+        ass_text = cls._compose_ass_dialogue_text(candidate_lines)
         return (ass_text, wrap_meta) if return_meta else ass_text
 
     @classmethod
@@ -6259,7 +6049,6 @@ class TaskProcessor:
         video_height,
         *,
         prefer_single_line=True,
-        single_line_min_font_scale=None,
     ):
         style, force_style = cls._build_subtitle_style_description(
             font_family,
@@ -6313,7 +6102,6 @@ class TaskProcessor:
                 video_height,
                 return_meta=True,
                 prefer_single_line=prefer_single_line,
-                single_line_min_font_scale=single_line_min_font_scale,
             )
             # `return_meta=True` is expected to return a tuple, but keep a safe fallback
             # to satisfy static analysis and guard unexpected call-path changes.
@@ -6351,7 +6139,7 @@ class TaskProcessor:
             )
         if overflow_warning_count:
             logger.warning(
-                "ASS overflow guard hit minimum per-cue font size but still detected %s potentially risky cue(s)",
+                "ASS overflow guard detected %s cue(s) still too wide after constant-font wrapping",
                 overflow_warning_count,
             )
         return ass_header + body
@@ -6366,7 +6154,6 @@ class TaskProcessor:
         video_height=None,
         font_family=None,
         prefer_single_line=True,
-        single_line_min_font_scale=None,
     ):
         """将SRT/VTT字幕转换为带默认流媒体样式的ASS格式。"""
         try:
@@ -6392,18 +6179,12 @@ class TaskProcessor:
                 task_logger.error(f"未解析出有效字幕条目，无法生成ASS: {os.path.basename(subtitle_path)}")
                 return False
 
-            config = getattr(self, 'config', {}) or {}
             ass_content = self._build_default_ass_document(
                 cues,
                 font_family=font_family,
                 video_width=video_width,
                 video_height=video_height,
                 prefer_single_line=prefer_single_line,
-                single_line_min_font_scale=(
-                    single_line_min_font_scale
-                    if single_line_min_font_scale is not None
-                    else config.get('SUBTITLE_SINGLE_LINE_MIN_FONT_SCALE', self._ASS_SINGLE_LINE_FONT_SCALE_MIN)
-                ),
             )
             with open(ass_path, 'w', encoding='utf-8') as ass_file:
                 ass_file.write(ass_content)
@@ -6608,10 +6389,6 @@ class TaskProcessor:
                         video_height=input_height,
                         font_family=font_family,
                         prefer_single_line=config.get('SUBTITLE_PREFER_SINGLE_LINE', True),
-                        single_line_min_font_scale=config.get(
-                            'SUBTITLE_SINGLE_LINE_MIN_FONT_SCALE',
-                            self._ASS_SINGLE_LINE_FONT_SCALE_MIN,
-                        ),
                     ):
                         task_logger.error("生成清晰ASS字幕失败，无法继续嵌入字幕流程")
                         update_task(task_id, upload_progress=None, status=previous_status, silent=True)

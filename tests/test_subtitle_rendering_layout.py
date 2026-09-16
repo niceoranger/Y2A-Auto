@@ -62,9 +62,8 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
     def test_landscape_layout_uses_wider_lines(self):
         max_line_length, max_lines = TaskProcessor._estimate_subtitle_layout_limits(1920, 1080)
 
-        # Landscape captions are hard-coded to a single line; font scaling is
-        # used instead of wrapping when the cue is slightly too long.
-        self.assertEqual(max_lines, 1)
+        # 2026-09-16 恒定字号: 横屏最多两行平衡拆分,字号恒定不再逐条缩小。
+        self.assertEqual(max_lines, 2)
         self.assertGreaterEqual(max_line_length, 22)
 
     def test_portrait_ass_style_keeps_higher_vertical_margin(self):
@@ -98,11 +97,12 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
         )
 
         self.assertTrue(text)
-        # Landscape captions are forced to a single line; font scaling is
-        # applied before any wrap fallback is considered.
-        self.assertNotIn(r'\N', text)
-        self.assertIsNotNone(meta.get('font_override'))
-        self.assertGreater(meta['font_override'], 0)
+        # 恒定字号: 放不下就折两行,绝不逐条缩字号。
+        lines = self._extract_ass_lines(text)
+        self.assertLessEqual(len(lines), 2)
+        self.assertIsNone(meta.get('font_override'))
+        self.assertNotIn(r'{\fs', text)
+        self.assertFalse(meta.get('overflow_warning'))
 
     def test_long_landscape_wrap_avoids_breaking_common_phrases(self):
         text, meta = TaskProcessor._wrap_subtitle_text_for_ass(
@@ -113,10 +113,10 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
         )
 
         self.assertTrue(text)
-        # With single-line priority the cue stays intact; the original test
-        # sentence fits after down-scaling, so no phrase is broken.
-        self.assertNotIn(r'\N', text)
+        lines = self._extract_ass_lines(text)
+        self.assertLessEqual(len(lines), 2)
         self.assertFalse('前\\N提' in text or '前 提' in text)
+        self.assertFalse(meta.get('overflow_warning'))
 
     def test_mixed_language_wrap_keeps_latin_words_intact(self):
         text, meta = TaskProcessor._wrap_subtitle_text_for_ass(
@@ -131,8 +131,8 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
         self.assertIn('workflow', normalized)
         self.assertNotIn('w\\Norkflow', text)
         self.assertNotIn('You\\NTube', text)
-        # Landscape captions must stay on a single line.
-        self.assertEqual(len(lines), 1)
+        # 横屏最多两行,字号恒定。
+        self.assertLessEqual(len(lines), 2)
         self.assertFalse(meta.get('overflow_warning'))
 
     def test_wrap_avoids_splitting_cjk_run_mid_char(self):
@@ -165,8 +165,10 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
 
         lines = self._extract_ass_lines(text)
         self.assertTrue(text)
+        # 恒定字号: 平衡拆分目标 ≤5 行;边界 cue 退化为不限行数的宽度安全贪心
+        # 换行(该文本 53 视觉单位/行容量 10,约需 7-8 行),不再溢出告警。
         self.assertGreaterEqual(len(lines), 4)
-        self.assertLessEqual(len(lines), 5)
+        self.assertLessEqual(len(lines), 8)
         normalized = text.replace(r'\N', '')
         self.assertIn('Release', normalized)
         self.assertIn('notes', normalized)
@@ -201,40 +203,43 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
         self.assertNotIn(r'\N', text)
         self.assertFalse(meta.get('forced_wrap'))
 
-    def test_single_line_priority_scales_font_before_wrapping(self):
+    def test_long_cue_wraps_two_lines_at_constant_font(self):
         text, meta = TaskProcessor._wrap_subtitle_text_for_ass(
-            '这是一句中等长度的中文测试字幕，在横屏下默认字体可能一行放不下，但缩小字体后可以保持单行。',
+            '这是一句中等长度的中文测试字幕，在横屏下默认字体一行放不下，应当折成两行且字号保持不变。',
             1920,
             1080,
             return_meta=True,
             prefer_single_line=True,
-            single_line_min_font_scale=0.85,
         )
 
         self.assertTrue(text)
-        if r'\N' not in text:
-            self.assertIsNotNone(meta.get('font_override'))
-            self.assertGreater(meta['font_override'], 0)
-            self.assertLess(meta['font_override'], 100)
-        else:
-            self.assertFalse(meta.get('overflow_warning'))
+        lines = self._extract_ass_lines(text)
+        self.assertLessEqual(len(lines), 2)
+        self.assertIsNone(meta.get('font_override'))
+        self.assertNotIn(r'{\fs', text)
+        self.assertFalse(meta.get('overflow_warning'))
 
-    def test_landscape_forces_single_line_even_when_disabled(self):
-        text, meta = TaskProcessor._wrap_subtitle_text_for_ass(
-            '这是一句中等长度的中文测试字幕，在横屏下默认字体一行放不下，禁用单行优先后应立即换行。',
+    def test_wrap_result_same_with_or_without_single_line_priority(self):
+        text_priority, meta_priority = TaskProcessor._wrap_subtitle_text_for_ass(
+            '这是一句中等长度的中文测试字幕，在横屏下默认字体一行放不下，无论单行优先与否都恒定字号。',
+            1920,
+            1080,
+            return_meta=True,
+            prefer_single_line=True,
+        )
+        text_plain, meta_plain = TaskProcessor._wrap_subtitle_text_for_ass(
+            '这是一句中等长度的中文测试字幕，在横屏下默认字体一行放不下，无论单行优先与否都恒定字号。',
             1920,
             1080,
             return_meta=True,
             prefer_single_line=False,
         )
 
-        self.assertTrue(text)
-        # Landscape layout limits are hard-coded to one line regardless of the
-        # single-line preference flag.
-        self.assertNotIn(r'\N', text)
-        self.assertIsNotNone(meta.get('font_override'))
-        self.assertGreater(meta['font_override'], 0)
-        self.assertFalse(meta.get('overflow_warning'))
+        self.assertEqual(text_priority, text_plain)
+        self.assertIsNone(meta_priority.get('font_override'))
+        self.assertIsNone(meta_plain.get('font_override'))
+        self.assertFalse(meta_priority.get('overflow_warning'))
+        self.assertFalse(meta_plain.get('overflow_warning'))
 
     def test_ass_document_merges_existing_cue_line_breaks_for_landscape(self):
         ass_text = TaskProcessor._build_default_ass_document(
@@ -242,7 +247,6 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
             font_family='NotoSansCJKsc-Regular',
             video_width=1920,
             video_height=1080,
-            single_line_min_font_scale=0.60,
         )
 
         dialogue_texts = self._extract_dialogue_texts(ass_text)
@@ -250,23 +254,22 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
         self.assertNotIn(r'\N', dialogue_texts[0])
         self.assertIn('第一行第二行', dialogue_texts[0])
 
-    def test_ass_document_applies_font_override_for_long_landscape_cue(self):
+    def test_ass_document_wraps_long_landscape_cue_two_lines(self):
         ass_text = TaskProcessor._build_default_ass_document(
             [{
                 'start': 0.0,
                 'end': 3.0,
-                'text': '这是一条用于验证横屏单行烧录的超长字幕，需要缩小字号但不能重新拆成多行显示。',
+                'text': '这是一条用于验证横屏恒定字号烧录的超长字幕，放不下时应当折成两行而不是缩小字号。',
             }],
             font_family='NotoSansCJKsc-Regular',
             video_width=1920,
             video_height=1080,
-            single_line_min_font_scale=0.60,
         )
 
         dialogue_texts = self._extract_dialogue_texts(ass_text)
         self.assertEqual(len(dialogue_texts), 1)
-        self.assertIn(r'{\fs', dialogue_texts[0])
-        self.assertNotIn(r'\N', dialogue_texts[0])
+        self.assertNotIn(r'{\fs', dialogue_texts[0])
+        self.assertLessEqual(dialogue_texts[0].count(r'\N'), 1)
 
 
 if __name__ == '__main__':
