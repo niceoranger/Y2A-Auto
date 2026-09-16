@@ -10,10 +10,11 @@ from modules.config_manager import DEFAULT_CONFIG
 class TestDubConfig(unittest.TestCase):
     def test_defaults_present(self):
         for k in [
-            "DUB_PYTHON", "DUB_RUNNER", "DUB_XTTS_MODEL", "DUB_SPEAKER",
+            "DUB_ENABLED", "DUB_PYTHON", "DUB_RUNNER", "DUB_XTTS_MODEL", "DUB_SPEAKER",
             "DUB_LANGUAGE", "DUB_DEVICE", "DUB_MAX_TEMPO", "DUB_TIMEOUT_SECONDS",
         ]:
             self.assertIn(k, DEFAULT_CONFIG)
+        self.assertFalse(DEFAULT_CONFIG["DUB_ENABLED"])  # 2026-09-16: 默认不配音
         self.assertEqual(DEFAULT_CONFIG["DUB_PYTHON"], "/Users/mac/asr-venv/bin/python")
         self.assertEqual(
             DEFAULT_CONFIG["DUB_XTTS_MODEL"],

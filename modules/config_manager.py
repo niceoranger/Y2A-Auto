@@ -86,6 +86,7 @@ DEFAULT_CONFIG = {
     "WHISPERX_BATCH_SIZE": 16,               # 转写/对齐 batch
     "WHISPERX_TIMEOUT_SECONDS": 7200,        # 长视频 CPU 跑慢,超时 2h
     # AI 重制管线(Phase 3)——Demucs 音轨分离子系统(复用 REMASTER 总开关)
+    "DEMUCS_ENABLED": False,             # 子开关:Demucs 仅供配音消费,不配音则默认关
     "DEMUCS_PYTHON": "/Users/mac/asr-venv/bin/python",  # 复用 asr-venv
     "DEMUCS_RUNNER": "modules/demucs_runner.py",         # runner 脚本(相对项目根)
     "DEMUCS_MODEL_NAME": "htdemucs_ft",   # 最高精度(4x 慢于 htdemucs)
@@ -93,6 +94,7 @@ DEFAULT_CONFIG = {
     "DEMUCS_STEMS": 2,                    # 2-stem: vocals / no_vocals
     "DEMUCS_TIMEOUT_SECONDS": 7200,       # 长视频分离超时 2h
     # AI 重制管线——XTTSv2 + RubberBand 配音(复用 REMASTER 总开关)
+    "DUB_ENABLED": False,                # 子开关:默认关(2026-09-16 用户需求:原生音频+字幕,不配音)
     "DUB_PYTHON": "/Users/mac/asr-venv/bin/python",
     "DUB_RUNNER": "modules/dub_runner.py",
     "DUB_XTTS_MODEL": "tts_models/multilingual/multi-dataset/xtts_v2",

@@ -3206,6 +3206,12 @@ class TaskProcessor:
         只产中间产物落盘,不写任何下游业务字段(与 _run_remaster_asr 边界一致);
         供未来 TTS 配音子项目消费。软失败:失败不阻断 ASR/翻译/上传。
         """
+        # 2026-09-16 子开关:Demucs 仅供配音消费(DUB_ENABLED);不配音则整段跳过,
+        # 省 MPS 分离时间。跳过也算阶段完成(下游 composite 对缺件尽力合成)。
+        if not _as_bool(self.config.get('DEMUCS_ENABLED', False)):
+            task_logger.info("Demucs 未启用(DEMUCS_ENABLED=false),跳过音轨分离")
+            return False
+
         from modules.demucs_separator import DemucsSeparator
 
         task = get_task(task_id)
@@ -3337,6 +3343,12 @@ class TaskProcessor:
         只产中间产物落盘,不写任何下游业务字段;供未来 FFmpeg 合成子项目消费。
         软失败:失败不阻断上传。
         """
+        # 2026-09-16 子开关:默认关(用户需求:原生音频+字幕,不配音)。
+        # 跳过也算阶段完成,composite 检测不到 dubbed_audio 会自动保留原音。
+        if not _as_bool(self.config.get('DUB_ENABLED', False)):
+            task_logger.info("配音未启用(DUB_ENABLED=false),跳过配音,保留原生音频")
+            return False
+
         from modules.dub_generator import DubGenerator
 
         task = get_task(task_id)
