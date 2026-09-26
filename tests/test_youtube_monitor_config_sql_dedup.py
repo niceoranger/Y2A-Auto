@@ -48,6 +48,7 @@ def _install_stubs():
             def __init__(self, *args, **kwargs):
                 self.running = False
                 self._jobs = {}
+                self.init_kwargs = dict(kwargs)
 
             def add_job(self, func=None, trigger=None, minutes=None, id=None, args=None, replace_existing=False):
                 if id is not None:

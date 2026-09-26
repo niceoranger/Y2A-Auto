@@ -3279,6 +3279,7 @@ def youtube_monitor_config():
                 'latest_max_results': safe_int(request.form.get('latest_max_results'), 20),
                 'rate_limit_requests': safe_int(request.form.get('rate_limit_requests'), 20),
                 'rate_limit_window': safe_int(request.form.get('rate_limit_window'), 60),
+                'top_n_by_views': safe_int(request.form.get('top_n_by_views'), 0),
                 'auto_add_to_tasks': 'auto_add_to_tasks' in request.form,
                 'video_types': ','.join(request.form.getlist('video_types') or ['video','short','live'])
             }
@@ -3349,6 +3350,7 @@ def youtube_monitor_config_edit(config_id):
                 'latest_max_results': safe_int(request.form.get('latest_max_results'), 20),
                 'rate_limit_requests': safe_int(request.form.get('rate_limit_requests'), 20),
                 'rate_limit_window': safe_int(request.form.get('rate_limit_window'), 60),
+                'top_n_by_views': safe_int(request.form.get('top_n_by_views'), 0),
                 'auto_add_to_tasks': 'auto_add_to_tasks' in request.form,
                 'video_types': ','.join(request.form.getlist('video_types') or ['video','short','live'])
             }
@@ -3706,7 +3708,8 @@ if __name__ == '__main__':
     download_cleanup_scheduler = schedule_download_cleanup()
 
     try:
-        port = int(os.environ.get('PORT', 5000))
+        # macOS AirPlay 接收器占用 5000，默认改用 5001
+        port = int(os.environ.get('PORT', 5001))
         logger.info(f"服务启动，监听地址: http://127.0.0.1:{port}")
         # 使用标准Flask运行
         app.run(host='0.0.0.0', port=port, debug=False)

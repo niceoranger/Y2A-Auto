@@ -419,11 +419,21 @@
                         <div class="col-md-4">
                             <div class="mb-3">
                                 <label for="rate_limit_requests" class="form-label">最大请求数</label>
-                                <input type="number" class="form-control" id="rate_limit_requests" name="rate_limit_requests" 
+                                <input type="number" class="form-control" id="rate_limit_requests" name="rate_limit_requests"
                                        value="{{ config.rate_limit_requests if config else 20 }}" min="1" max="100">
                                 <div class="form-text">
                                     <span id="rate_limit_help_youtube">调度间隔内的最大API请求数，同时限制每次添加到任务队列的视频数量</span>
                                     <span id="rate_limit_help_historical" class="d-none">每次最多处理多少个视频到上传任务模块</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="top_n_by_views" class="form-label">播放量优选前 N 个</label>
+                                <input type="number" class="form-control" id="top_n_by_views" name="top_n_by_views"
+                                       value="{{ config.top_n_by_views if config and config.top_n_by_views is not none else 0 }}" min="0" max="50">
+                                <div class="form-text">
+                                    0 = 不限制。大于 0 时，每次只把新视频中播放量最高的前 N 个加入任务队列，其余本次不下载
                                 </div>
                             </div>
                         </div>

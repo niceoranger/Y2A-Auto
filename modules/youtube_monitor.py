@@ -108,6 +108,7 @@ MONITOR_CONFIG_FIELD_DEFAULTS: Dict[str, Any] = {
     'latest_max_results': 20,
     'rate_limit_requests': 100,
     'rate_limit_window': 60,
+    'top_n_by_views': 0,
     'auto_add_to_tasks': False,
     'historical_progress_date': '',
     'historical_offset': 0,
@@ -122,7 +123,8 @@ class YouTubeMonitor:
         self.api_key = api_key
         self.youtube: Optional[Any] = None
         self.youtube_http: Optional[httplib2.Http] = None
-        self.scheduler = BackgroundScheduler()
+        # misfire 宽限期:晚点触发别整轮跳过(错过 2 秒也会导致 1-2 小时监控空窗)
+        self.scheduler = BackgroundScheduler(misfire_grace_time=300)
         self.db_path = os.path.join(get_app_subdir('db'), 'youtube_monitor.db')
         self._last_fetch_had_errors = False
         self._api_proxy_enabled = False
@@ -245,7 +247,13 @@ class YouTubeMonitor:
                 cursor.execute("ALTER TABLE monitor_configs ADD COLUMN historical_offset INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
-            
+
+            # 播放量排序优选：每次仅入队播放量最高的前 N 个（0 = 不启用）
+            try:
+                cursor.execute("ALTER TABLE monitor_configs ADD COLUMN top_n_by_views INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+
             # 监控历史表
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS monitor_history (
@@ -885,14 +893,25 @@ class YouTubeMonitor:
             # 获取添加到任务队列的数量限制
             # 所有模式都使用rate_limit_requests来控制每次添加的视频数量
             max_add_to_tasks = config.get('rate_limit_requests', 20) if auto_add_enabled else 0
-            
+
             logger.info(f"开始处理视频，自动添加到任务队列: {'是' if auto_add_enabled else '否'}")
             if auto_add_enabled:
                 logger.info(f"本次最大添加到任务队列数量: {max_add_to_tasks}")
-            
+
+            # 播放量排序优选：本次新视频按播放量降序，只入队前 N 个
+            top_n_by_views = self._to_positive_int(config.get('top_n_by_views'))
+            top_video_ids = None
+            if auto_add_enabled and top_n_by_views > 0:
+                top_video_ids = self._select_top_by_views(filtered_videos, config_id, top_n_by_views)
+
             for video in filtered_videos:
                 # 检查是否已经处理过
                 if not self._is_video_processed(video['id'], config_id):
+                    if top_video_ids is not None and video['id'] not in top_video_ids:
+                        # 未进入播放量前 N：不写历史不建任务，下次抓取时播放量增长仍有机会入选
+                        logger.info(f"未进入播放量前 {top_n_by_views} 名，本次跳过: {video['title']}")
+                        continue
+
                     # 检查是否还能添加到任务队列
                     should_add_to_tasks = auto_add_enabled and added_count < max_add_to_tasks
                     
@@ -1555,6 +1574,17 @@ class YouTubeMonitor:
         if config['max_duration'] > 0 and duration_seconds > config['max_duration']:
             return False
         
+        # 频道定位门禁：非财经内容不进流水线（MONITOR_FINANCE_ONLY 开关）
+        try:
+            from modules.config_manager import load_config
+            if str(load_config().get('MONITOR_FINANCE_ONLY', '')).strip().lower() in ('true', '1', 'on', 'yes'):
+                from modules.content_gate import is_finance_related
+                if not is_finance_related(video_info['title'], logger=logger):
+                    logger.info(f"财经门禁拦截(非财经内容): {video_info['title'][:60]}")
+                    return False
+        except Exception as gate_err:
+            logger.warning(f"财经门禁执行异常，放行: {gate_err}")
+        
         return True
     
     def _parse_duration(self, duration_str):
@@ -1574,6 +1604,25 @@ class YouTubeMonitor:
         
         return hours * 3600 + minutes * 60 + seconds
     
+    @staticmethod
+    def _to_positive_int(value) -> int:
+        """把配置值安全转为非负整数，非法值按 0 处理"""
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _select_top_by_views(self, videos, config_id, top_n):
+        """在未处理过的视频中按播放量降序取前 N 个，返回入选 video_id 集合"""
+        new_videos = [v for v in videos if not self._is_video_processed(v['id'], config_id)]
+        new_videos.sort(key=lambda v: (v.get('view_count') or 0), reverse=True)
+        selected = {v['id'] for v in new_videos[:top_n]}
+        skipped = len(new_videos) - len(selected)
+        logger.info(
+            f"播放量排序优选: 新视频 {len(new_videos)} 个，取播放量最高的前 {top_n} 个入队，{skipped} 个本次跳过"
+        )
+        return selected
+
     def _is_video_processed(self, video_id, config_id):
         """检查视频是否已经处理过"""
         with sqlite3.connect(self.db_path) as conn:
