@@ -72,8 +72,39 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
         self.assertEqual(style['PlayResX'], 1080)
         self.assertEqual(style['PlayResY'], 1920)
         self.assertGreaterEqual(style['MarginV'], 200.0)
-        self.assertGreaterEqual(style['FontSize'], 66.0)
+        # 2026-09-25 竖屏字号按画宽 5.8% 锚定:1080 宽 → ~62.6
+        self.assertAlmostEqual(style['FontSize'], 1080 * 0.058, delta=1.0)
         self.assertGreaterEqual(style['Outline'], 2.0)
+
+    def test_font_size_scales_proportionally_across_resolutions(self):
+        """字号随画幅等比:历史 1080p 不变,低清/竖屏不再被下限托大。"""
+        cases = {
+            # (width, height): (字号, 占画高比例允许区间)
+            (1920, 1080): (70.0, (0.060, 0.070)),
+            (2560, 1440): (93.0, (0.060, 0.070)),
+            (640, 360): (23.0, (0.060, 0.070)),
+            (1280, 720): (47.0, (0.060, 0.070)),
+        }
+        for (w, h), (expected_font, ratio_range) in cases.items():
+            style = TaskProcessor._build_streaming_ass_style(w, h)
+            self.assertAlmostEqual(
+                style['FontSize'], expected_font, delta=1.0,
+                msg=f"{w}x{h} 横屏字号应保持屏高 6.5%",
+            )
+            ratio = style['FontSize'] / h
+            self.assertTrue(
+                ratio_range[0] <= ratio <= ratio_range[1],
+                msg=f"{w}x{h} 字号占画高比例 {ratio:.3f} 失衡",
+            )
+
+    def test_portrait_font_size_anchors_to_width(self):
+        """竖屏按画宽 5.8% 锚定:单字占宽 ~5.8%,不再随高度放大。"""
+        for w, h in ((720, 1280), (1080, 1920), (360, 640)):
+            style = TaskProcessor._build_streaming_ass_style(w, h)
+            ratio = style['FontSize'] / w
+            self.assertAlmostEqual(ratio, 0.058, delta=0.004, msg=f"{w}x{h}")
+            # 底距同样随画高等比,低清竖屏不再被下限顶高
+            self.assertLessEqual(style['MarginV'] / h, 0.14)
 
     def test_portrait_layout_uses_fewer_lines_and_stays_safe(self):
         max_line_length, max_lines = TaskProcessor._estimate_subtitle_layout_limits(1080, 1920)

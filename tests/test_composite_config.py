@@ -12,10 +12,11 @@ class TestCompositeConfig(unittest.TestCase):
         for k in ["COMPOSITE_MAX_DELOGO_SEGMENTS", "COMPOSITE_DELOGO_PAD_PX",
                   "COMPOSITE_TIMEOUT_SECONDS", "COMPOSITE_BURN_SUBTITLE"]:
             self.assertIn(k, DEFAULT_CONFIG)
-        self.assertEqual(DEFAULT_CONFIG["COMPOSITE_MAX_DELOGO_SEGMENTS"], 40)
+        self.assertEqual(DEFAULT_CONFIG["COMPOSITE_MAX_DELOGO_SEGMENTS"], 200)
         self.assertEqual(DEFAULT_CONFIG["COMPOSITE_DELOGO_PAD_PX"], 6)
         self.assertEqual(DEFAULT_CONFIG["COMPOSITE_TIMEOUT_SECONDS"], 10800)
         self.assertTrue(DEFAULT_CONFIG["COMPOSITE_BURN_SUBTITLE"])
+        self.assertEqual(DEFAULT_CONFIG["COMPOSITE_WIDE_BAND_RATIO"], 0.12)
 
     def test_remaster_switch_still_off(self):
         self.assertIn("REMASTER_PIPELINE_ENABLED", DEFAULT_CONFIG)

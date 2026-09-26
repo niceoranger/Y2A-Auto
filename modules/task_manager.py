@@ -1129,6 +1129,11 @@ def init_db():
             logger.info("数据库升级：添加sau_upload_responses字段")
             conn.commit()
 
+        if 'retry_count' not in columns:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
+            logger.info("数据库升级：添加retry_count字段(自动重试计数)")
+            conn.commit()
+
         if 'recommended_partition_id_acfun' not in columns:
             cursor.execute("ALTER TABLE tasks ADD COLUMN recommended_partition_id_acfun TEXT")
             logger.info("数据库升级：添加recommended_partition_id_acfun字段")
@@ -1543,6 +1548,7 @@ def update_task(task_id, silent=False, **kwargs):
         'composite_warning_message': 'composite_warning_message = ?',
         'sau_upload_responses': 'sau_upload_responses = ?',
         'upload_targets': 'upload_targets = ?',
+        'retry_count': 'retry_count = ?',
     }
 
     # 过滤掉不在白名单中的列
@@ -1848,8 +1854,49 @@ def _get_task_download_dir_real(task_id):
 
     return task_dir_real
 
+def _requeue_failed_task(task, config):
+    """把单个失败任务重新入队(手动/自动重试共用语义)。
+
+    返回 'completed'(其实是误标失败,已纠正) | 'scheduled'(已调度) | 'failed'(调度失败)。
+    """
+    task_id = task['id']
+    original_error = task.get('error_message')
+    upload_target = _get_task_upload_target(task)
+
+    # 失败状态兜底修复：目标平台其实都成功时，直接纠正为 completed，避免重复调度
+    if _task_has_upload_response(task, upload_target):
+        update_task(
+            task_id,
+            silent=True,
+            status=TASK_STATES['COMPLETED'],
+            error_message=None,
+            upload_progress=None
+        )
+        return 'completed'
+
+    # 对“部分平台已成功”的失败任务，保留 FAILED 状态以触发 process_task 的失败点续传分支
+    next_status = TASK_STATES['FAILED'] if _has_partial_upload_success(task, upload_target) else TASK_STATES['PENDING']
+    update_task(
+        task_id,
+        silent=True,
+        status=next_status,
+        error_message=None,
+        upload_progress=None
+    )
+
+    if start_task(task_id, config):
+        return 'scheduled'
+    update_task(
+        task_id,
+        silent=True,
+        status=TASK_STATES['FAILED'],
+        error_message=original_error or '批量重试调度失败，请稍后重试。'
+    )
+    return 'failed'
+
+
 def retry_failed_tasks(config=None):
-    """重新调度所有失败的任务。"""
+    """重新调度所有失败的任务(手动入口,不限重试次数)。"""
     failed_tasks = get_tasks_by_status(TASK_STATES['FAILED'])
     total = len(failed_tasks)
     if total == 0:
@@ -1871,46 +1918,77 @@ def retry_failed_tasks(config=None):
     failed_ids = []
 
     for task in failed_tasks:
-        task_id = task['id']
-        original_error = task.get('error_message')
-        upload_target = _get_task_upload_target(task)
-
-        # 失败状态兜底修复：目标平台其实都成功时，直接纠正为 completed，避免重复调度
-        if _task_has_upload_response(task, upload_target):
-            update_task(
-                task_id,
-                silent=True,
-                status=TASK_STATES['COMPLETED'],
-                error_message=None,
-                upload_progress=None
-            )
-            continue
-
-        # 对“部分平台已成功”的失败任务，保留 FAILED 状态以触发 process_task 的失败点续传分支
-        next_status = TASK_STATES['FAILED'] if _has_partial_upload_success(task, upload_target) else TASK_STATES['PENDING']
-        update_task(
-            task_id,
-            silent=True,
-            status=next_status,
-            error_message=None,
-            upload_progress=None
-        )
-
-        if start_task(task_id, config):
+        outcome = _requeue_failed_task(task, config)
+        if outcome == 'scheduled':
             scheduled += 1
-        else:
-            failed_ids.append(task_id)
-            update_task(
-                task_id,
-                silent=True,
-                status=TASK_STATES['FAILED'],
-                error_message=original_error or '批量重试调度失败，请稍后重试。'
-            )
+        elif outcome == 'failed':
+            failed_ids.append(task['id'])
 
     return {
         'total': total,
         'scheduled': scheduled,
         'failed_ids': failed_ids
+    }
+
+
+def _filter_auto_retry_candidates(failed_tasks, max_retries):
+    """挑出还能自动重试的失败任务(retry_count 未超上限)。纯函数便于单测。"""
+    out = []
+    for task in failed_tasks or []:
+        try:
+            count = int(task.get('retry_count') or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if 0 <= count < max_retries:
+            out.append(task)
+    return out
+
+
+def auto_retry_failed_tasks(config=None):
+    """周期自动重试失败任务,受 AUTO_RETRY_FAILED_MAX_RETRIES 次数上限约束。
+
+    与手动重试同语义;每次成功调度递增 retry_count,永久失败的任务耗尽额度后不再自动重试
+    (手动重试不受影响)。
+    """
+    if config is None:
+        try:
+            from modules.config_manager import load_config
+            config = load_config()
+        except Exception:
+            config = {}
+
+    max_retries = _as_int(config.get('AUTO_RETRY_FAILED_MAX_RETRIES', 2), 2, minimum=0)
+    if max_retries <= 0:
+        return {'total': 0, 'scheduled': 0, 'skipped_max_retries': 0}
+
+    failed_tasks = get_tasks_by_status(TASK_STATES['FAILED'])
+    candidates = _filter_auto_retry_candidates(failed_tasks, max_retries)
+    skipped = len(failed_tasks) - len(candidates)
+
+    scheduled = 0
+    for task in candidates:
+        task_id = task['id']
+        try:
+            count = int(task.get('retry_count') or 0)
+        except (TypeError, ValueError):
+            count = 0
+        outcome = _requeue_failed_task(task, config)
+        if outcome == 'scheduled':
+            update_task(task_id, silent=True, retry_count=count + 1)
+            scheduled += 1
+            logger.info(f"自动重试任务已入队(第 {count + 1} 次): {task_id}")
+        elif outcome == 'completed':
+            logger.info(f"自动重试发现任务已全部上传成功,纠正为 completed: {task_id}")
+
+    if failed_tasks:
+        logger.info(
+            f"自动重试完成: 失败任务 {len(failed_tasks)} 个, "
+            f"重入队 {scheduled} 个, 超次数上限跳过 {skipped} 个"
+        )
+    return {
+        'total': len(failed_tasks),
+        'scheduled': scheduled,
+        'skipped_max_retries': skipped
     }
 
 def delete_task_files(task_id):
@@ -2088,7 +2166,9 @@ class TaskProcessor:
             },
             job_defaults={
                 'coalesce': False,
-                'max_instances': 1  # 每个任务只能有一个实例在运行，避免重复执行同一任务
+                'max_instances': 1,  # 每个任务只能有一个实例在运行，避免重复执行同一任务
+                # 触发晚到 2 分钟内照常执行,避免扫描/重试周期被整轮跳过
+                'misfire_grace_time': 120
             }
         )
         self.scheduler.start()
@@ -2138,6 +2218,26 @@ class TaskProcessor:
             logger.info(f"已启动卡住任务扫描：每 {stuck_check_interval} 秒")
         except Exception as e:
             logger.warning(f"注册卡住任务扫描失败（不影响主流程）：{e}")
+
+        try:
+            retry_interval = _as_int(
+                self.config.get('AUTO_RETRY_FAILED_INTERVAL_SEC', 1800),
+                1800,
+                minimum=60,
+            )
+            self.scheduler.add_job(
+                lambda: auto_retry_failed_tasks(self.config),
+                'interval',
+                seconds=retry_interval,
+                id='auto_retry_failed',
+                replace_existing=True
+            )
+            logger.info(
+                f"已启动失败任务自动重试：每 {retry_interval} 秒"
+                f"(上限 {self.config.get('AUTO_RETRY_FAILED_MAX_RETRIES', 2)} 次/任务)"
+            )
+        except Exception as e:
+            logger.warning(f"注册失败任务自动重试失败（不影响主流程）：{e}")
 
     def _refresh_runtime_limits(self, force=False):
         """按当前配置刷新并发上限；运行中有活动任务时延后生效。"""
@@ -2535,6 +2635,9 @@ class TaskProcessor:
                     if ok:
                         completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_TRANSLATE_SUBTITLE)
                     if task is not None and task['status'] == TASK_STATES['FAILED']:
+                        if task.get('subtitle_qc_reason') == 'asr_no_subtitle':
+                            task_logger.error("ASR 未生成字幕，终止任务处理（不发布无字幕视频）")
+                            return
                         task_logger.error("字幕处理失败，继续执行后续步骤")
                 _raise_if_cancelled(task_id, task_logger)
 
@@ -3261,7 +3364,7 @@ class TaskProcessor:
         只产中间产物落盘,不写任何下游业务字段(与 _run_remaster_demucs 边界一致);
         软失败:失败不阻断翻译/上传。
         """
-        from modules.ocr_locator import OcrLocator
+        from modules.ocr_locator import OcrLocator, guess_language_from_srt_file, resolve_ocr_lang
 
         task = get_task(task_id)
         if not task:
@@ -3286,11 +3389,12 @@ class TaskProcessor:
 
         # 配置解析放在 status 翻转之前,避免非法浮点导致任务卡在 OCR_LOCATING
         try:
-            sample_interval = float(self.config.get('OCR_SAMPLE_INTERVAL_SEC', 0.5) or 0.5)
+            sample_interval = float(self.config.get('OCR_SAMPLE_INTERVAL_SEC', 2.0) or 2.0)
             if sample_interval <= 0:
-                sample_interval = 0.5
+                sample_interval = 2.0
         except (TypeError, ValueError):
-            sample_interval = 0.5
+            sample_interval = 2.0
+        ocr_workers = min(16, _as_int(self.config.get('OCR_WORKERS', 4), 4, minimum=1))
         try:
             iou_threshold = float(self.config.get('OCR_IOU_THRESHOLD', 0.5) or 0.5)
             if iou_threshold <= 0:
@@ -3303,7 +3407,22 @@ class TaskProcessor:
                 bottom_band_min_y = 0.0
         except (TypeError, ValueError):
             bottom_band_min_y = 0.6
+        try:
+            min_rec_score = float(self.config.get('OCR_MIN_REC_SCORE', 0.6) or 0.0)
+            if min_rec_score < 0:
+                min_rec_score = 0.0
+        except (TypeError, ValueError):
+            min_rec_score = 0.6
         lang = str(self.config.get('OCR_LANG', 'ch') or 'ch')
+        # OCR 语言跟随源视频语言:优先任务已检测语言,其次从重制 ASR 的 SRT 内容推断,
+        # 都没有再回退配置值。用错语言模型会把衣物/胸针误检成"文字"变成 delogo 马赛克。
+        detected_lang = str(task.get('subtitle_language_detected') or '').strip().lower()
+        if detected_lang in ('', 'auto'):
+            asr_srt = os.path.join(task_dir, f"asr_whisperx_{task_id}.srt")
+            if os.path.exists(asr_srt):
+                detected_lang = guess_language_from_srt_file(asr_srt)
+        if detected_lang and detected_lang != 'auto':
+            lang = resolve_ocr_lang(detected_lang, fallback=lang)
         device = str(self.config.get('OCR_DEVICE', 'cpu') or 'cpu')
         timeout = _as_int(self.config.get('OCR_TIMEOUT_SECONDS', 3600), 3600, minimum=60)
 
@@ -3311,7 +3430,10 @@ class TaskProcessor:
         update_task(task_id, status=TASK_STATES['OCR_LOCATING'])
         task_logger.info(
             f"重制管线:调用 OCR({lang}/{device}, interval={sample_interval}, "
-            f"bottom_y>={bottom_band_min_y}),输出 {out_json}"
+            f"workers={ocr_workers}, bottom_y>={bottom_band_min_y}, "
+            f"min_rec_score={min_rec_score}"
+            f"{f', 源语言={detected_lang}' if detected_lang and detected_lang != 'auto' else ''}"
+            f"),输出 {out_json}"
         )
 
         locator = OcrLocator(python_bin=python_bin, runner_path=runner_path)
@@ -3325,6 +3447,8 @@ class TaskProcessor:
             device=device,
             iou_threshold=iou_threshold,
             bottom_band_min_y=bottom_band_min_y,
+            min_rec_score=min_rec_score,
+            workers=ocr_workers,
             progress_callback=lambda t: task_logger.info(f"[ocr] {t}"),
             timeout=timeout,
         )
@@ -3479,8 +3603,35 @@ class TaskProcessor:
         if input_already_subtitled:
             subtitle_srt = None
 
+        # 2026-09-26 擦除必须先于烧字幕:有擦除段且存在校准样式 ASS 时,
+        # 改在"原始视频"上单趟完成 擦除(遮条/delogo) → 烧中文。
+        # 此前在已烧字幕的视频上后置 delogo,擦除框与中文字幕带重叠,
+        # 把刚烧好的中文字幕一起抹掉(即"大面积字幕马赛克"事故)。
+        persisted_ass = os.path.join(task_dir, f"subtitle_burn_{task_id}.ass")
+        out_has_subtitle = input_already_subtitled
+        if ocr_segments and input_already_subtitled and burn and os.path.isfile(persisted_ass):
+            base_name = os.path.splitext(os.path.basename(video_path))[0]
+            original_candidates = [
+                os.path.join(os.path.dirname(video_path),
+                             base_name[:-len('_with_subtitle')] + os.path.splitext(video_path)[1]),
+                os.path.join(task_dir, 'video.mp4'),
+            ]
+            original_video = next((p for p in original_candidates if os.path.isfile(p)), None)
+            if original_video:
+                video_path = original_video
+                subtitle_srt = persisted_ass
+                input_already_subtitled = False
+                out_has_subtitle = True
+                task_logger.info(
+                    f"擦除先于烧录:改用原始视频单趟合成(擦除+ASS 烧字幕), 输入 {original_video}"
+                )
+
         pad_px = _as_int(self.config.get('COMPOSITE_DELOGO_PAD_PX', 6), 6, minimum=0)
         max_seg = _as_int(self.config.get('COMPOSITE_MAX_DELOGO_SEGMENTS', 40), 40, minimum=1)
+        try:
+            wide_band_ratio = float(self.config.get('COMPOSITE_WIDE_BAND_RATIO', 0.45) or 0.45)
+        except (TypeError, ValueError):
+            wide_band_ratio = 0.45
         timeout = _as_int(self.config.get('COMPOSITE_TIMEOUT_SECONDS', 10800), 10800, minimum=60)
 
         ffmpeg_bin = get_ffmpeg_path(logger=task_logger)
@@ -3488,7 +3639,7 @@ class TaskProcessor:
             task_logger.warning("未找到 ffmpeg,跳过成片合成")
             return False
 
-        out_name = f"remastered_{task_id}{'_with_subtitle' if input_already_subtitled else ''}.mp4"
+        out_name = f"remastered_{task_id}{'_with_subtitle' if out_has_subtitle else ''}.mp4"
         out_path = os.path.join(task_dir, out_name)
 
         prev_status = task.get('status')
@@ -3502,7 +3653,8 @@ class TaskProcessor:
             ffmpeg_bin=ffmpeg_bin, input_video=video_path, output_video=out_path,
             ocr_segments=ocr_segments, video_width=vw, video_height=vh,
             dubbed_audio=dubbed_audio, subtitle_srt=subtitle_srt,
-            pad_px=pad_px, max_delogo_segments=max_seg, timeout=timeout,
+            pad_px=pad_px, max_delogo_segments=max_seg, wide_band_ratio=wide_band_ratio,
+            timeout=timeout,
             logger=task_logger,
         )
         if ok:
@@ -3528,8 +3680,15 @@ class TaskProcessor:
         
         # 检查是否已经有ASR QC失败的记录，如果失败则跳过所有字幕处理
         if task.get('subtitle_qc_failed') == 1:
-            task_logger.warning("检测到字幕质检已失败，跳过字幕翻译/烧录流程")
-            return True
+            if task.get('subtitle_qc_reason') == 'asr_no_subtitle':
+                # ASR 未出字幕属可重试故障（网络/模型加载抖动）：清除标记后重跑 ASR
+                task_logger.warning("检测到此前ASR未生成字幕，清除标记并重试ASR")
+                update_task(task_id, subtitle_qc_failed=0, subtitle_qc_reason=None,
+                            subtitle_qc_checked_at=None)
+                task = get_task(task_id) or task
+            else:
+                task_logger.warning("检测到字幕质检已失败，跳过字幕翻译/烧录流程")
+                return True
         
         translation_enabled = _as_bool(self.config.get('SUBTITLE_TRANSLATION_ENABLED', False))
         config_embed_enabled = _as_bool(self.config.get('SUBTITLE_EMBED_IN_VIDEO', True))
@@ -3630,8 +3789,13 @@ class TaskProcessor:
                                 )
                                 update_task(task_id, error_message=merged_error)
                             self._mark_subtitle_issue(task_id, 'asr_no_subtitle')
-                            task_logger.warning("语音识别未能生成字幕，跳过字幕流程")
-                            return True
+                            task_logger.error("语音识别未能生成字幕，任务转失败（不发布无字幕视频）")
+                            update_task(
+                                task_id,
+                                status=TASK_STATES['FAILED'],
+                                error_message='ASR未能生成字幕，已阻止无字幕发布（可重试）',
+                            )
+                            return False
                     else:
                         task_logger.warning("语音识别未启用或视频文件缺失，跳过字幕流程")
                         return True
@@ -4044,31 +4208,22 @@ class TaskProcessor:
         'OutlineColour': '&H0000FFFF',
         'BackColour': '&H00000000',
     }
-    _ASS_LANDSCAPE_FONT_SIZE_ANCHORS = (
-        # 2026-09-15 统一屏高比例；同日应需求放大: 5% → 6.5%
-        (720.0, 47.0),
-        (1080.0, 70.0),
-        (1440.0, 93.0),
-        (2160.0, 140.0),
-    )
-    _ASS_PORTRAIT_FONT_SIZE_ANCHORS = (
-        (720.0, 47.0),
-        (1280.0, 83.0),
-        (1920.0, 125.0),
-        (2560.0, 166.0),
-    )
-    _ASS_LANDSCAPE_MARGIN_V_ANCHORS = (
-        (720.0, 41.0),
-        (1080.0, 62.0),
-        (1440.0, 83.0),
-        (2160.0, 124.0),
-    )
-    _ASS_PORTRAIT_MARGIN_V_ANCHORS = (
-        (720.0, 120.0),
-        (1280.0, 156.0),
-        (1920.0, 220.0),
-        (2560.0, 292.0),
-    )
+    # 2026-09-25 字号/底距改为画幅等比:
+    #   横屏 = 屏高 6.5%(与旧锚点 720/1080/1440/2160 各档完全一致),
+    #   竖屏 = 画宽 5.8%(窄画幅按高度锚定会让单字占宽超 11%,视觉过大)。
+    #   取消旧 46/47px 下限——360p 低清源曾被下限托住,字幕视觉比例达 1080p 历史视频的 2 倍。
+    _ASS_FONT_HEIGHT_RATIO = 0.065
+    _ASS_LANDSCAPE_FONT_MIN = 18.0
+    _ASS_LANDSCAPE_FONT_MAX = 132.0
+    _ASS_LANDSCAPE_MARGIN_V_RATIO = 0.0574
+    _ASS_LANDSCAPE_MARGIN_V_MIN = 12.0
+    _ASS_LANDSCAPE_MARGIN_V_MAX = 156.0
+    _ASS_PORTRAIT_FONT_WIDTH_RATIO = 0.058
+    _ASS_PORTRAIT_FONT_MIN = 20.0
+    _ASS_PORTRAIT_FONT_MAX = 120.0
+    _ASS_PORTRAIT_MARGIN_V_RATIO = 0.122
+    _ASS_PORTRAIT_MARGIN_V_MIN = 16.0
+    _ASS_PORTRAIT_MARGIN_V_MAX = 320.0
     # Landscape captions use generous side margins to avoid crowding the
     # edges, while leaving enough width for single-line cues at base font.
     _ASS_LANDSCAPE_SIDE_MARGIN_RATIO = 0.025
@@ -4561,14 +4716,14 @@ class TaskProcessor:
         is_portrait = height > width
         if is_portrait:
             font_size = cls._clamp(
-                cls._interpolate_anchor_value(height, cls._ASS_PORTRAIT_FONT_SIZE_ANCHORS),
-                58.0,
-                80.0,
+                width * cls._ASS_PORTRAIT_FONT_WIDTH_RATIO,
+                cls._ASS_PORTRAIT_FONT_MIN,
+                cls._ASS_PORTRAIT_FONT_MAX,
             )
             margin_v = cls._clamp(
-                cls._interpolate_anchor_value(height, cls._ASS_PORTRAIT_MARGIN_V_ANCHORS),
-                150.0,
-                320.0,
+                height * cls._ASS_PORTRAIT_MARGIN_V_RATIO,
+                cls._ASS_PORTRAIT_MARGIN_V_MIN,
+                cls._ASS_PORTRAIT_MARGIN_V_MAX,
             )
             side_margin = cls._clamp(
                 width * cls._ASS_PORTRAIT_SIDE_MARGIN_RATIO,
@@ -4577,14 +4732,14 @@ class TaskProcessor:
             )
         else:
             font_size = cls._clamp(
-                cls._interpolate_anchor_value(height, cls._ASS_LANDSCAPE_FONT_SIZE_ANCHORS),
-                46.0,
-                132.0,
+                height * cls._ASS_FONT_HEIGHT_RATIO,
+                cls._ASS_LANDSCAPE_FONT_MIN,
+                cls._ASS_LANDSCAPE_FONT_MAX,
             )
             margin_v = cls._clamp(
-                cls._interpolate_anchor_value(height, cls._ASS_LANDSCAPE_MARGIN_V_ANCHORS),
-                46.0,
-                156.0,
+                height * cls._ASS_LANDSCAPE_MARGIN_V_RATIO,
+                cls._ASS_LANDSCAPE_MARGIN_V_MIN,
+                cls._ASS_LANDSCAPE_MARGIN_V_MAX,
             )
             side_margin = cls._clamp(
                 width * cls._ASS_LANDSCAPE_SIDE_MARGIN_RATIO,
@@ -6406,6 +6561,14 @@ class TaskProcessor:
                         update_task(task_id, upload_progress=None, status=previous_status, silent=True)
                         return None
                     task_logger.info("已为非ASS字幕生成统一底部居中ASS临时文件")
+                    # 持久化校准样式 ASS:供成片合成在"先擦后烧"单趟模式中复用
+                    # (擦除层必须先于字幕层,否则 delogo 会抹掉刚烧好的中文字幕)
+                    try:
+                        persisted_ass = os.path.join(
+                            video_dir, f"subtitle_burn_{task_id}.ass")
+                        shutil.copy2(render_subtitle_path, persisted_ass)
+                    except Exception as persist_err:
+                        task_logger.warning(f"ASS 样式文件持久化失败(不影响本次烧录): {persist_err}")
                     filter_segments = [
                         f"subtitles={render_subtitle_name}",
                         "fontsdir=fonts",
@@ -7618,8 +7781,15 @@ class TaskProcessor:
                 return get_task(task_id)
 
             if task.get('subtitle_qc_failed') == 1:
-                task_logger.warning("检测到字幕质检已失败，跳过上传前的字幕处理")
-                return get_task(task_id)
+                if task.get('subtitle_qc_reason') == 'asr_no_subtitle':
+                    # ASR 未出字幕属可重试故障：清除标记后重跑，而不是跳过上传前字幕处理
+                    task_logger.warning("检测到此前ASR未生成字幕，清除标记并重试ASR")
+                    update_task(task_id, subtitle_qc_failed=0, subtitle_qc_reason=None,
+                                subtitle_qc_checked_at=None)
+                    task = get_task(task_id) or task
+                else:
+                    task_logger.warning("检测到字幕质检已失败，跳过上传前的字幕处理")
+                    return get_task(task_id)
 
             should_embed_subtitle = _as_bool(self.config.get('SUBTITLE_EMBED_IN_VIDEO', True))
             translation_enabled = _as_bool(self.config.get('SUBTITLE_TRANSLATION_ENABLED', False))
@@ -7759,7 +7929,12 @@ class TaskProcessor:
                                     task_logger.warning("ASR 字幕质检未通过，跳过上传前烧录")
                             else:
                                 self._mark_subtitle_issue(task_id, 'asr_no_subtitle')
-                                task_logger.warning("ASR 未能生成字幕，继续上传流程")
+                                task_logger.error("ASR 未能生成字幕，任务转失败（不发布无字幕视频）")
+                                update_task(
+                                    task_id,
+                                    status=TASK_STATES['FAILED'],
+                                    error_message='ASR未能生成字幕，已阻止无字幕发布（可重试）',
+                                )
                     else:
                         task_logger.info("已存在字幕文件，跳过ASR 生成")
             else:
@@ -7777,6 +7952,14 @@ class TaskProcessor:
         task = get_task(task_id)
         if not task:
             task_logger.error("任务不存在")
+            return
+
+        # 无字幕发布门禁：ASR 未生成字幕的任务一律不发布（可重试）
+        if task.get('subtitle_qc_failed') == 1 and task.get('subtitle_qc_reason') == 'asr_no_subtitle':
+            task_logger.error("ASR 未生成字幕，阻止上传（不发布无字幕视频）")
+            if task.get('status') != TASK_STATES['FAILED']:
+                update_task(task_id, status=TASK_STATES['FAILED'],
+                            error_message='ASR未能生成字幕，已阻止无字幕发布（可重试）')
             return
 
         if not self._ensure_required_translations_ready(
@@ -8030,7 +8213,13 @@ class TaskProcessor:
         cover_path = self._recover_cover_path(task_id, cover_path, task_logger)
         
         if not subtitle_prepared:
-            task = self._prepare_subtitle_for_upload(task_id, task_logger) or task
+            _prep_task = self._prepare_subtitle_for_upload(task_id, task_logger)
+            if _prep_task is not None and \
+                    _prep_task.get('status') == TASK_STATES['FAILED'] and \
+                    _prep_task.get('subtitle_qc_reason') == 'asr_no_subtitle':
+                task_logger.error("ASR 未生成字幕，终止上传（不发布无字幕视频）")
+                return
+            task = _prep_task or task
             video_path = task.get('video_path_local', '') if task else video_path
 
         # 重新设置状态为上传中（字幕翻译可能已在上述步骤执行）
@@ -8222,7 +8411,13 @@ class TaskProcessor:
 
         # 字幕预处理(与原生路径一致:首次上传前做一次)
         if not subtitle_prepared:
-            task = self._prepare_subtitle_for_upload(task_id, task_logger) or task
+            _prep_task = self._prepare_subtitle_for_upload(task_id, task_logger)
+            if _prep_task is not None and \
+                    _prep_task.get('status') == TASK_STATES['FAILED'] and \
+                    _prep_task.get('subtitle_qc_reason') == 'asr_no_subtitle':
+                task_logger.error("ASR 未生成字幕，终止上传（不发布无字幕视频）")
+                return
+            task = _prep_task or task
             video_path = task.get('video_path_local', '') if task else video_path
 
         if not video_path or not os.path.exists(video_path):
@@ -8315,7 +8510,13 @@ class TaskProcessor:
         cover_path = self._recover_cover_path(task_id, cover_path, task_logger)
 
         if not subtitle_prepared:
-            task = self._prepare_subtitle_for_upload(task_id, task_logger) or task
+            _prep_task = self._prepare_subtitle_for_upload(task_id, task_logger)
+            if _prep_task is not None and \
+                    _prep_task.get('status') == TASK_STATES['FAILED'] and \
+                    _prep_task.get('subtitle_qc_reason') == 'asr_no_subtitle':
+                task_logger.error("ASR 未生成字幕，终止上传（不发布无字幕视频）")
+                return
+            task = _prep_task or task
             video_path = task.get('video_path_local', '') if task else video_path
 
         update_task(task_id, status=TASK_STATES['UPLOADING'], upload_progress='0.0%')

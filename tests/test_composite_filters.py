@@ -7,6 +7,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from modules.remaster_composite import (
     norm_box_to_pixels,
     build_delogo_filter,
+    build_erase_filters,
     build_vf_chain,
     _ffmpeg_path_escape,
     build_composite_cmd,
@@ -113,6 +114,64 @@ class TestBuildCompositeCmd(unittest.TestCase):
         )
         self.assertIn("-c:v", cmd)
         self.assertIn("copy", cmd)
+
+
+class TestBuildEraseFilters(unittest.TestCase):
+    """宽字幕带 → 黑色遮条;窄区域 → delogo;两者数量上限独立。"""
+
+    def test_wide_segment_uses_drawbox_narrow_uses_delogo(self):
+        segs = [
+            # 宽字幕带(60% 宽):满幅烧录原字幕
+            {"start": 0.0, "end": 10.0, "box": [0.23, 0.88, 0.60, 0.05]},
+            # 窄区域(10% 宽):角标/小水印
+            {"start": 0.0, "end": 5.0, "box": [0.8, 0.8, 0.10, 0.05]},
+        ]
+        chain, stats = build_erase_filters(segs, 640, 360, pad_px=0)
+        self.assertEqual(stats, {"delogo": 1, "box": 1, "skipped": 0})
+        self.assertIn("drawbox=x=147:y=317:w=384:h=18:color=black@1.0:t=fill", chain)
+        self.assertIn("delogo=x=512:y=288:w=64:h=18", chain)
+
+    def test_threshold_boundary(self):
+        segs = [{"start": 0.0, "end": 1.0, "box": [0.1, 0.8, 0.45, 0.05]}]
+        _, stats = build_erase_filters(segs, 640, 360, pad_px=0, wide_width_ratio=0.45)
+        self.assertEqual(stats["box"], 1)
+        segs = [{"start": 0.0, "end": 1.0, "box": [0.1, 0.8, 0.44, 0.05]}]
+        _, stats = build_erase_filters(segs, 640, 360, pad_px=0, wide_width_ratio=0.45)
+        self.assertEqual(stats["delogo"], 1)
+
+    def test_independent_caps(self):
+        # 60 个宽带 + 60 个窄带:宽带不受 delogo 40 上限约束
+        segs = (
+            [{"start": float(i), "end": i + 0.5, "box": [0.1, 0.8, 0.60, 0.05]} for i in range(60)]
+            + [{"start": float(i), "end": i + 0.5, "box": [0.1, 0.8, 0.10, 0.05]} for i in range(60)]
+        )
+        chain, stats = build_erase_filters(segs, 640, 360, pad_px=0,
+                                           max_delogo_segments=40, max_box_segments=240)
+        self.assertEqual(stats["delogo"], 40)
+        self.assertEqual(stats["box"], 60)
+        self.assertEqual(stats["skipped"], 20)
+        self.assertEqual(chain.count("drawbox="), 60)
+        self.assertEqual(chain.count("delogo="), 40)
+
+    def test_empty_segments(self):
+        chain, stats = build_erase_filters([], 640, 360)
+        self.assertEqual(chain, "")
+        self.assertEqual(stats, {"delogo": 0, "box": 0, "skipped": 0})
+
+
+class TestAssSubtitlePath(unittest.TestCase):
+    """run_composite 对 .ass 输入不做 force_style(按文件自带校准样式渲染)。"""
+
+    def test_ass_input_skips_force_style(self):
+        source = pathlib.Path(__file__).resolve().parents[1] / "modules" / "remaster_composite.py"
+        text = source.read_text(encoding="utf-8")
+        self.assertIn('sub_ext in (".ass", ".ssa")', text)
+        self.assertIn("f\"subtitles='{srt_esc}':fontsdir='{fonts_esc}':charenc=UTF-8\"", text)
+
+    def test_erase_order_precedes_subtitle_in_vf_chain(self):
+        # build_vf_chain 恒定 擦除在前、字幕在后
+        chain = build_vf_chain("drawbox=x=1:y=2:w=3:h=4", "subtitles=z.ass")
+        self.assertLess(chain.index("drawbox"), chain.index("subtitles"))
 
 
 if __name__ == "__main__":

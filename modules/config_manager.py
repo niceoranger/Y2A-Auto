@@ -106,15 +106,18 @@ DEFAULT_CONFIG = {
     # AI 重制管线——PaddleOCR 字幕定位(复用 REMASTER 总开关)
     "OCR_PYTHON": "/Users/mac/asr-venv/bin/python",
     "OCR_RUNNER": "modules/ocr_runner.py",
-    "OCR_SAMPLE_INTERVAL_SEC": 0.5,
+    "OCR_SAMPLE_INTERVAL_SEC": 2.0,        # 字幕条通常持续数秒,2s 采样 + 聚类时间扩展兜底;0.5s 会把 OCR 拖到 14x 实时
+    "OCR_WORKERS": 4,                      # OCR 并行进程数;18 核机器 2 并发任务各开 4 worker 仍有余量
     "OCR_LANG": "ch",
     "OCR_DEVICE": "cpu",
     "OCR_IOU_THRESHOLD": 0.5,
     "OCR_BOTTOM_BAND_MIN_Y": 0.6,         # 底栏优先:只保留 y>=此值的检测;0=全画面
+    "OCR_MIN_REC_SCORE": 0.6,             # 识别置信度阈值;文本无效或低于此值按误检丢弃,不进 delogo
     "OCR_TIMEOUT_SECONDS": 3600,
     # AI 重制管线——FFmpeg 字幕擦除 + 成片合成(复用 REMASTER 总开关)
-    "COMPOSITE_MAX_DELOGO_SEGMENTS": 40,   # delogo 段数上限,超出则合并相近段,防 filtergraph 爆炸
+    "COMPOSITE_MAX_DELOGO_SEGMENTS": 200,  # delogo 段数上限;每帧仅1-2段激活,上限只为防滤镜链过长
     "COMPOSITE_DELOGO_PAD_PX": 6,          # delogo 框四周额外像素,确保盖住抗锯齿边缘
+    "COMPOSITE_WIDE_BAND_RATIO": 0.12,     # 擦除框宽≥此比例(0-1)用黑色遮条(字幕行),更小的用 delogo,避免涂抹马赛克
     "COMPOSITE_TIMEOUT_SECONDS": 10800,    # 3h,重编码长视频
     "COMPOSITE_BURN_SUBTITLE": True,       # 是否硬烧译文字幕进画面
     # 多选投稿平台列表(新):如 ["bilibili","douyin"]。空列表视为 ["acfun"]
@@ -196,6 +199,9 @@ DEFAULT_CONFIG = {
     "MAX_CONCURRENT_TASKS": 2,  # 最大并发任务数
     "MAX_CONCURRENT_UPLOADS": 1,  # 最大并发上传数
     "STUCK_TASK_CHECK_INTERVAL_SECONDS": 300,  # 自动扫描并恢复卡住任务的时间间隔（秒）
+    # 失败任务自动重试(下载/上传偶发失败无需手动点重试)
+    "AUTO_RETRY_FAILED_MAX_RETRIES": 2,   # 每任务自动重试次数上限;0=关闭自动重试(手动重试不受限)
+    "AUTO_RETRY_FAILED_INTERVAL_SEC": 1800,  # 自动重试扫描间隔（秒）
     # 视频转码相关（硬编默认输出 HEVC/H.265，CPU 保持 H.264）
     "VIDEO_ENCODER": "auto",  # auto/cpu/nvidia/intel/amd - 自动检测或指定编码器
     "VIDEO_CUSTOM_PARAMS_ENABLED": False,  # 是否启用自定义转码参数
