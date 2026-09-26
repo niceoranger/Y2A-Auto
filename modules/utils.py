@@ -327,6 +327,9 @@ def openai_chat_create_with_thinking_control(
         thinking_body = {}
     thinking_body.update({'type': 'disabled', 'enabled': False})
     extra_body['thinking'] = thinking_body
+    # mlx_vlm.server 认的是顶层 enable_thinking 布尔字段（schemas.py），
+    # Anthropic 风格 thinking dict 它不读——两个都带上以覆盖两种服务端
+    extra_body['enable_thinking'] = False
     disabled_kwargs['extra_body'] = extra_body
 
     try:

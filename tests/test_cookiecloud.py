@@ -19,6 +19,7 @@ from modules.cookiecloud import (
     decrypt_cookiecloud_payload,
     resolve_cookie_output_path,
     sync_cookiecloud_to_youtube_file,
+    try_cookiecloud_youtube_sync,
 )
 
 
@@ -384,6 +385,68 @@ class CookieCloudTests(unittest.TestCase):
         self.assertTrue(self.sync_absolute_path.exists())
         written = self.sync_absolute_path.read_text(encoding="utf-8")
         self.assertIn("SAPISID", written)
+
+    def _sync_settings(self):
+        return {
+            "COOKIECLOUD_ENABLED": True,
+            "COOKIECLOUD_SERVER_URL": "https://cookiecloud.example.com",
+            "COOKIECLOUD_UUID": TEST_CC_USER,
+            "COOKIECLOUD_PASSWORD": TEST_CC_KEY,
+            "COOKIECLOUD_ALLOW_PLAINTEXT_EXPORT": True,
+            "COOKIECLOUD_CRYPTO_TYPE": "auto",
+            "YOUTUBE_COOKIES_PATH": self.sync_relative_path,
+        }
+
+    def test_try_cookiecloud_youtube_sync_keeps_local_auth_when_remote_visitor_only(self):
+        self.sync_absolute_path.write_text(
+            "# Netscape HTTP Cookie File\n"
+            ".youtube.com\tTRUE\t/\tTRUE\t2000000000\tSAPISID\tlocal-auth\n",
+            encoding="utf-8",
+        )
+        visitor_payload = {
+            "cookie_data": {
+                "youtube.com": [
+                    {
+                        "domain": ".youtube.com",
+                        "hostOnly": False,
+                        "path": "/",
+                        "secure": True,
+                        "expirationDate": 2000000000,
+                        "name": "VISITOR_INFO1_LIVE",
+                        "value": "visitor",
+                    }
+                ]
+            },
+            "local_storage_data": {},
+        }
+        with patch(
+            "modules.cookiecloud.fetch_cookiecloud_payload",
+            return_value={"encrypted": "fake"},
+        ), patch(
+            "modules.cookiecloud.decrypt_cookiecloud_payload",
+            return_value=(visitor_payload, COOKIECLOUD_CRYPTO_LEGACY),
+        ):
+            ok, info = try_cookiecloud_youtube_sync(self._sync_settings())
+
+        self.assertFalse(ok)
+        self.assertIn("登录态", info)
+        written = self.sync_absolute_path.read_text(encoding="utf-8")
+        self.assertIn("local-auth", written)
+        self.assertNotIn("VISITOR_INFO1_LIVE", written)
+
+    def test_try_cookiecloud_youtube_sync_accepts_remote_auth_cookies(self):
+        with patch(
+            "modules.cookiecloud.fetch_cookiecloud_payload",
+            return_value={"encrypted": "fake"},
+        ), patch(
+            "modules.cookiecloud.decrypt_cookiecloud_payload",
+            return_value=(self.payload, COOKIECLOUD_CRYPTO_LEGACY),
+        ):
+            ok, result = try_cookiecloud_youtube_sync(self._sync_settings())
+
+        self.assertTrue(ok)
+        self.assertEqual(result["cookie_count"], 3)
+        self.assertIn("SAPISID", self.sync_absolute_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

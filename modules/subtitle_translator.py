@@ -407,8 +407,7 @@ class LLMRequester:
                         {"role": "user", "content": user_prompt}
                     ],
                     "max_tokens": 4096,
-                    "response_format": {"type": "json_object"},  # 强制JSON输出
-                },
+                                    },
                 thinking_enabled=self.openai_config.get('OPENAI_THINKING_ENABLED', False),
                 logger=self.logger,
                 scene_name='subtitle_translate_batch',
@@ -470,8 +469,7 @@ class LLMRequester:
                         {"role": "user", "content": user_prompt}
                     ],
                     "max_tokens": 4096,
-                    "response_format": {"type": "json_object"},
-                },
+                                    },
                 thinking_enabled=self.openai_config.get('OPENAI_THINKING_ENABLED', False),
                 logger=self.logger,
                 scene_name='subtitle_translate_batch_strict',

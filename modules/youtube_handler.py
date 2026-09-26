@@ -71,11 +71,25 @@ def _detect_js_runtime_args() -> list[str]:
 
 
 def _get_youtube_runtime_args() -> list[str]:
-    """统一 YouTube 运行时参数。"""
+    """统一 YouTube 运行时参数。
+
+    优先使用本机已安装的 yt-dlp-ejs / node runtime。
+    仅在未检测到本地 ejs 时才允许远程拉取 ejs:github，避免预检阶段因外网组件卡住。
+    """
     args = _detect_js_runtime_args()
     if not args:
         logger.warning("未检测到 JavaScript 运行时（node/deno），yt-dlp 的 n challenge 求解可能失败")
-    args.extend(['--remote-components', 'ejs:github'])
+
+    # 本地 yt-dlp-ejs 已足够解 n challenge；远程组件会额外访问 GitHub，易超时/挂起
+    has_local_ejs = False
+    try:
+        import importlib.util
+        has_local_ejs = importlib.util.find_spec('yt_dlp_ejs') is not None
+    except Exception:
+        has_local_ejs = False
+
+    if not has_local_ejs:
+        args.extend(['--remote-components', 'ejs:github'])
     return args
 
 
@@ -506,7 +520,7 @@ def test_video_availability(youtube_url, yt_dlp_cmd, cookies_path=None, logger=N
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=45,
+                timeout=120,
                 encoding='utf-8',
                 errors='replace'
             )

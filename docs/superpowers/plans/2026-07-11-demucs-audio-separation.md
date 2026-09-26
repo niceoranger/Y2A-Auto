@@ -38,9 +38,11 @@
 
 Run:
 ```bash
-/Users/mac/asr-venv/bin/pip install -U demucs
+/Users/mac/asr-venv/bin/pip install -U demucs soundfile
 ```
 Expected: 安装成功；`demucs` 及其依赖（`dora-search`/`julius`/`lameenc`/`openunmix` 等）就位。torch/torchaudio 已在 venv（2.8.0），不应被降级。
+
+**注意 `soundfile` 是硬依赖**：torchaudio 2.9 移除了内置 wav 写后端，缺 `soundfile`(libsndfile) 时 Demucs 能算出分离但**保存 wav 时报 "Couldn't find appropriate backend to handle uri ...vocals.wav"**。真实冒烟实测踩过这坑，必须一并装。
 
 - [ ] **Step 2: 验证 demucs 可导入 + CLI 可用**
 

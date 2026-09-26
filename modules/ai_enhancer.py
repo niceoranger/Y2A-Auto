@@ -597,12 +597,14 @@ def _request_json_object(
     user_content=None,
 ) -> Optional[Dict[str, Any]]:
     try:
+        # 2026-09-11: mlx_vlm server 的 json_object 约束解码会污染首个 JSON 键
+        # (实测 {"/title":..}、{"":..} 等变体)，导致解析出空标题 → 去掉强制 JSON 模式，
+        # 模型在无约束下可稳定输出纯 JSON（提示词+解析器已兼容）。
         response = _request_chat_completion(
             client, model_name, system_prompt, payload,
             max_tokens=max_tokens, temperature=temperature,
             thinking_enabled=thinking_enabled, logger_obj=logger_obj,
             scene_name=scene_name, user_content=user_content,
-            response_format={"type": "json_object"},
         )
     except Exception as exc:
         if _is_timeout_like_error(exc) or _is_response_format_unsupported_error(exc):

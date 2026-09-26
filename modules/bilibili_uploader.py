@@ -368,12 +368,14 @@ class BilibiliUploader:
 
             _emit_progress("0.0%")
             self.log("开始上传到bilibili")
+            from .bili_upload_transport import upload_transport
             try:
-                result = asyncio.run(uploader.start())
+                with upload_transport():
+                    result = asyncio.run(uploader.start())
             except RuntimeError:
                 # 已有事件循环时，在新线程中运行
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                with upload_transport(), concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     result = pool.submit(asyncio.run, uploader.start()).result()
 
             last_emitted_percent = 100.0

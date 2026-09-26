@@ -43,10 +43,57 @@ class WhisperXAsr:
                "--device", str(device or "cpu"),
                "--compute-type", str(compute_type or "int8"),
                "--batch-size", str(batch_size or 16)]
-        self._log(f"调用 whisperx runner: {' '.join(cmd)}")
+        # huggingface.co 直连在国内网络常被 SSL 重置;模型已缓存时优先离线加载,
+        # 离线失败(缓存缺失)再联网重试并挂应用代理,避免 ASR 间歇性崩掉导致无字幕发布。
+        offline_env = os.environ.copy()
+        offline_env["HF_HUB_OFFLINE"] = "1"
+        # onnxruntime(silero VAD)内置的微软遥测后台线程经本机代理拿坏响应时会
+        # recursive_mutex 抛异常 abort(退出码 -6);关闭遥测即可根除
+        offline_env["ORT_DISABLE_TELEMETRY"] = "1"
+        self._log(f"调用 whisperx runner: {' '.join(cmd)} (HF_HUB_OFFLINE=1)")
+        ok, result = self._run_runner(cmd, offline_env, timeout, progress_callback)
+        if not ok and self._looks_like_offline_miss(result):
+            online_env = self._build_online_env()
+            if online_env is not None:
+                self._log("离线加载失败(疑似缓存缺失),联网重试并使用代理下载模型")
+                ok, result = self._run_runner(cmd, online_env, timeout, progress_callback)
+        if not ok:
+            return False, result if isinstance(result, str) else str(result)
+        return True, result
+
+    @staticmethod
+    def _looks_like_offline_miss(error: object) -> bool:
+        """判断 runner 失败是否疑似『离线模式缺缓存/网络被墙』,可联网重试。"""
+        if not isinstance(error, str):
+            return False
+        text = error.lower()
+        return any(kw in text for kw in (
+            "offline", "cache", "huggingface", "ssl", "connection",
+            "max retries", "localentrynotfound", "请求超时", "网络",
+        ))
+
+    @staticmethod
+    def _build_online_env() -> dict:
+        """构建联网重试环境:带应用代理,不设 HF_HUB_OFFLINE。"""
+        env = os.environ.copy()
+        env.pop("HF_HUB_OFFLINE", None)
+        env["ORT_DISABLE_TELEMETRY"] = "1"
+        try:
+            from modules.config_manager import load_config
+            from modules.youtube_handler import build_proxy_url
+            proxy = build_proxy_url(load_config() or {})
+            if proxy:
+                env.setdefault("HTTPS_PROXY", proxy)
+                env.setdefault("HTTP_PROXY", proxy)
+        except Exception:
+            pass
+        return env
+
+    def _run_runner(self, cmd, env, timeout, progress_callback):
+        """执行 runner 子进程,逐行读进度,返回 (ok, result_dict_or_error)。"""
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1, env=os.environ.copy())
+                                    text=True, bufsize=1, env=env)
         except FileNotFoundError as e:
             return False, f"启动 runner 失败: {e}"
 

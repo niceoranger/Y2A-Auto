@@ -525,6 +525,36 @@ def sync_cookiecloud_to_youtube_file(
     }
 
 
+_YOUTUBE_AUTH_COOKIE_NAMES = frozenset({
+    'SAPISID', 'APISID', 'SID', 'HSID', 'SSID',
+    '__Secure-1PSID', '__Secure-1PAPISID', 'LOGIN_INFO',
+})
+
+
+def _content_has_youtube_auth_cookies(cookie_text: str | None) -> bool:
+    """判断 Netscape 格式 cookie 文本是否包含 YouTube/Google 一方登录态字段。"""
+    for raw_line in (cookie_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 7 and parts[5].strip() in _YOUTUBE_AUTH_COOKIE_NAMES:
+            return True
+    return False
+
+
+def _read_cookie_file_if_exists(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                return f.read()
+    except Exception:
+        pass
+    return None
+
+
 def try_cookiecloud_youtube_sync(
     settings: dict[str, Any] | None,
     *,
@@ -538,6 +568,10 @@ def try_cookiecloud_youtube_sync(
     所有异常内部捕获，不会向调用方抛出。
 
     仅在 CookieCloud 已启用且允许明文导出时执行。
+
+    防自毁保护：若本地文件已含登录态而 CookieCloud 远端只有游客态
+    （如推送端浏览器未登录 YouTube），则回滚本次覆盖并保留本地登录态，
+    避免自动恢复把可用 cookies 洗掉导致后续下载全部失败。
     """
     try:
         effective_config = dict(settings or {})
@@ -545,9 +579,24 @@ def try_cookiecloud_youtube_sync(
             return False, "CookieCloud 未启用"
         if not _as_bool(effective_config.get("COOKIECLOUD_ALLOW_PLAINTEXT_EXPORT", False)):
             return False, "CookieCloud 未允许明文导出"
+        previous_path = resolve_cookie_output_path(
+            effective_config.get("YOUTUBE_COOKIES_PATH") or DEFAULT_YOUTUBE_COOKIES_PATH,
+            default_relative_path=DEFAULT_YOUTUBE_COOKIES_PATH,
+        )
+        previous_content = _read_cookie_file_if_exists(previous_path)
         result = sync_cookiecloud_to_youtube_file(
             effective_config, timeout=timeout, session=session,
         )
+        if (
+            previous_content is not None
+            and _content_has_youtube_auth_cookies(previous_content)
+            and not _content_has_youtube_auth_cookies(result.get("content"))
+        ):
+            try:
+                _write_cookie_file(result["output_path"], previous_content)
+            except Exception:
+                pass
+            return False, "CookieCloud 返回的 cookies 缺少 YouTube 登录态，已保留本地登录态文件"
         return True, result
     except Exception:
         return False, "CookieCloud 同步失败"
