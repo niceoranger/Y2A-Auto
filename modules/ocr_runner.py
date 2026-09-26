@@ -1,16 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""PaddleOCR 字幕定位 runner。用 /Users/mac/asr-venv/bin/python 跑。
+"""OCR 字幕定位 runner。用 /Users/mac/asr-venv/bin/python 跑。
+
+RapidOCR(onnxruntime)推理,自带 PP-OCRv4 模型、离线可用;
+替换原 PaddleOCR 方案(paddle 3.3.1 线程池在本机存在无法规避的段错误)。
 
 契约:
   CLI: --video <p> --output <json> --task-id <id>
        [--sample-interval 0.5] [--lang ch] [--device cpu] [--iou-threshold 0.5]
+       [--min-rec-score 0.6]
   stdout: 进度行 + 末行 JSON {ok, boxes|error}
   退出码: 0 成功 / 1 运行失败 / 2 参数/依赖错
+
+误检防护:识别文本为空/过短或置信度低于阈值的检测在聚类前被丢弃
+(衣服上的胸针/麦克风等高频误检源识别不出有效文本)。
 """
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -108,36 +116,117 @@ def filter_box(norm_box, min_area=0.0005, max_aspect=40.0) -> bool:
     return True
 
 
+# 文字字符(拉丁/数字/中日韩),用于判定检测框里是否有"真文字"
+_WORD_CHAR_RE = re.compile(
+    r"[0-9A-Za-z\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]"
+)
 
-def run_ocr_on_frames(frames, width, height, lang: str, device: str) -> list:
-    """返回 dets: [{t, box, score}, ...]。全画面。兼容 PaddleOCR 2.x/3.x。"""
-    from paddleocr import PaddleOCR
 
-    use_gpu = str(device).lower() in ("gpu", "cuda", "true", "1")
-    device_arg = "gpu" if use_gpu else "cpu"
-    print(f"[ocr] 加载 PaddleOCR lang={lang} device={device_arg}", flush=True)
+def count_word_chars(text) -> int:
+    """识别文本中文字字符数(忽略空白与标点)。"""
+    return len(_WORD_CHAR_RE.findall(str(text or "")))
 
-    ocr = None
-    # 3.x: device= ; 2.x: use_gpu= / show_log= 等
-    init_attempts = [
-        {"lang": lang, "device": device_arg},
-        {"lang": lang, "device": device_arg, "use_textline_orientation": True},
-        {"lang": lang, "use_gpu": use_gpu},
-        {"lang": lang, "use_angle_cls": True, "use_gpu": use_gpu},
-        {"lang": lang},
+
+def is_valid_text_det(text, min_word_chars: int = 2) -> bool:
+    """True=检测框内是有效文字。空/单字符视为误检(衣物、麦克风等图形误检)。"""
+    return count_word_chars(text) >= max(1, int(min_word_chars))
+
+
+def filter_valid_text_dets(dets: list, min_score: float = 0.6) -> list:
+    """聚类前的误检过滤:识别文本无效或置信度低于阈值的检测全部丢弃。"""
+    threshold = max(0.0, float(min_score or 0.0))
+    return [
+        d for d in (dets or [])
+        if is_valid_text_det(d.get("text"))
+        and float(d.get("score") or 0.0) >= threshold
     ]
-    last_err = None
-    for kwargs in init_attempts:
-        try:
-            ocr = PaddleOCR(**kwargs)
-            print(f"[ocr] PaddleOCR init ok kwargs={list(kwargs.keys())}", flush=True)
-            break
-        except Exception as e:
-            last_err = e
-            continue
-    if ocr is None:
-        raise RuntimeError(f"PaddleOCR 初始化失败: {last_err}")
 
+
+
+def _init_ocr(lang: str, device: str):
+    """初始化 RapidOCR 实例。失败抛 RuntimeError。"""
+    from rapidocr_onnxruntime import RapidOCR
+
+    try:
+        ocr = RapidOCR()
+    except Exception as e:
+        raise RuntimeError(f"RapidOCR 初始化失败: {e}") from None
+    print(f"[ocr] RapidOCR init ok (lang={lang} device={device})", flush=True)
+    return ocr
+
+
+# 多进程 worker 的进程内 OCR 实例(spawn 子进程里由 initializer 填充)
+_POOL_OCR = {}
+
+
+def _pool_init(lang: str, device: str):
+    try:
+        _POOL_OCR["ocr"] = _init_ocr(lang, device)
+    except Exception as e:
+        print(f"[ocr] worker 初始化失败: {e}", flush=True)
+        _POOL_OCR["ocr"] = None
+
+
+def _pool_work(job):
+    """job=(t, path) → (t, [(box_pts, score, text), ...] | None, err|None)。"""
+    t, path = job
+    ocr = _POOL_OCR.get("ocr")
+    if ocr is None:
+        return (t, None, "worker 无 OCR 实例")
+    try:
+        return (t, _ocr_predict_pages(ocr, path), None)
+    except Exception as e:
+        return (t, None, str(e))
+
+
+def run_ocr_on_frames(frames, width, height, lang: str, device: str, workers: int = 1) -> list:
+    """返回 dets: [{t, box, score}, ...]。全画面。兼容 PaddleOCR 2.x/3.x。
+
+    workers>1 且帧数足够时用多进程并行(spawn,每 worker 独立加载模型),
+    失败自动回退单进程顺序处理。
+    """
+    print(f"[ocr] 加载 PaddleOCR lang={lang} device={device} workers={workers}", flush=True)
+
+    def _collect(t, page_items):
+        dets = []
+        for box_pts, score, text in page_items or []:
+            norm = pixel_box_to_norm(box_pts, width, height)
+            if not filter_box(norm):
+                continue
+            dets.append({
+                "t": float(t), "box": norm,
+                "score": float(score),
+                "text": str(text or "").strip(),
+            })
+        return dets
+
+    # 多进程并行:帧数太少时初始化开销(每 worker 加载模型)不划算
+    if workers and workers > 1 and len(frames) >= 24:
+        try:
+            import multiprocessing as mp
+            ctx = mp.get_context("spawn")
+            jobs = [(t, path) for t, path in frames]
+            dets = []
+            done = 0
+            with ctx.Pool(
+                processes=min(int(workers), len(jobs)),
+                initializer=_pool_init,
+                initargs=(lang, device),
+            ) as pool:
+                for t, items, err in pool.imap_unordered(_pool_work, jobs, chunksize=1):
+                    done += 1
+                    if done % 20 == 0:
+                        print(f"[ocr] 已完成 {done}/{len(jobs)} 帧(并行)", flush=True)
+                    if err is not None:
+                        print(f"[ocr] 帧失败 t={t}: {err}", flush=True)
+                        continue
+                    dets.extend(_collect(t, items))
+            print(f"[ocr] 并行 OCR 完成,workers={workers}", flush=True)
+            return dets
+        except Exception as e:
+            print(f"[ocr] 并行 OCR 失败,回退单进程: {e}", flush=True)
+
+    ocr = _init_ocr(lang, device)
     dets = []
     for i, (t, path) in enumerate(frames):
         if i % 20 == 0:
@@ -147,89 +236,18 @@ def run_ocr_on_frames(frames, width, height, lang: str, device: str) -> list:
         except Exception as e:
             print(f"[ocr] 帧失败 t={t}: {e}", flush=True)
             continue
-        for box_pts, score in page_items:
-            norm = pixel_box_to_norm(box_pts, width, height)
-            if not filter_box(norm):
-                continue
-            dets.append({"t": float(t), "box": norm, "score": float(score)})
+        dets.extend(_collect(t, page_items))
     return dets
 
 
 def _ocr_predict_pages(ocr, path: str) -> list:
-    """统一 2.x/3.x 输出为 [(box_pts, score), ...]。
-
-    3.x predict()/ocr(): list[OCRResult|dict] with dt_polys/rec_polys + rec_scores
-    2.x ocr(): list[list[[box,(text,score)], ...]] per image
-    """
-    result = None
-    if hasattr(ocr, "predict"):
-        try:
-            result = ocr.predict(path)
-        except Exception:
-            result = None
-    if result is None:
-        try:
-            result = ocr.ocr(path, cls=True)
-        except TypeError:
-            result = ocr.ocr(path)
-
-    if not result:
-        return []
-
+    """RapidOCR 输出 → [(box_pts, score, text), ...]。box 为四点坐标。"""
+    result, _ = ocr(path)
     items = []
-    first = result[0] if isinstance(result, list) and result else result
-    if _is_ocr_result_page(first):
-        pages = result if isinstance(result, list) else [result]
-        for page in pages:
-            items.extend(_parse_ocr_result_page(page))
-        return items
-
-    # 2.x style
-    lines = first if isinstance(first, list) else result
-    if not lines:
-        return []
-    for item in lines:
-        if not item or len(item) < 2:
-            continue
-        box_pts, meta = item[0], item[1]
-        score = float(meta[1]) if meta and len(meta) > 1 else 0.0
-        items.append((box_pts, score))
+    for det in result or []:
+        box_pts, text, score = det[0], det[1], det[2]
+        items.append((box_pts, float(score or 0.0), str(text or "")))
     return items
-
-
-def _is_ocr_result_page(obj) -> bool:
-    if obj is None:
-        return False
-    if isinstance(obj, dict):
-        return "dt_polys" in obj or "rec_polys" in obj or "rec_scores" in obj
-    try:
-        return hasattr(obj, "keys") and (
-            "dt_polys" in obj or "rec_polys" in obj or hasattr(obj, "get")
-        )
-    except Exception:
-        return False
-
-
-def _parse_ocr_result_page(page) -> list:
-    def _get(key, default=None):
-        if isinstance(page, dict):
-            return page.get(key, default)
-        try:
-            return page[key]
-        except Exception:
-            return getattr(page, key, default)
-
-    polys = _get("rec_polys") or _get("dt_polys") or []
-    scores = _get("rec_scores") or []
-    out = []
-    for i, poly in enumerate(polys):
-        try:
-            pts = poly.tolist() if hasattr(poly, "tolist") else list(poly)
-        except Exception:
-            pts = poly
-        score = float(scores[i]) if i < len(scores) else 0.0
-        out.append((pts, score))
-    return out
 
 
 def main():
@@ -237,13 +255,20 @@ def main():
     ap.add_argument("--video", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--task-id", required=True)
-    ap.add_argument("--sample-interval", type=float, default=0.5)
+    ap.add_argument("--sample-interval", type=float, default=2.0)
     ap.add_argument("--lang", default="ch")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="OCR 并行进程数;>1 且帧数足够时启用多进程")
     ap.add_argument("--iou-threshold", type=float, default=0.5)
+    ap.add_argument("--min-rec-score", type=float, default=0.6,
+                    help="识别置信度阈值,低于此值或文本无效的检测按误检丢弃")
     ap.add_argument("--bottom-band-min-y", type=float, default=0.6,
                     help="只保留 y>=此值的检测(底栏优先);0=全画面")
     args = ap.parse_args()
+
+    # onnxruntime 遥测后台线程在本机代理环境下会 abort(须在 import 前设置)
+    os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
 
     if not os.path.isfile(args.video):
         _emit({"ok": False, "error": f"视频不存在: {args.video}"})
@@ -252,17 +277,17 @@ def main():
         _emit({"ok": False, "error": "ffmpeg/ffprobe 未安装或不在 PATH"})
         return 2
     try:
-        from paddleocr import PaddleOCR  # noqa: F401
+        from rapidocr_onnxruntime import RapidOCR  # noqa: F401
     except Exception as e:
-        _emit({"ok": False, "error": f"import paddleocr 失败(检查 asr-venv): {e}"})
+        _emit({"ok": False, "error": f"import rapidocr_onnxruntime 失败(检查 asr-venv): {e}"})
         return 2
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from modules.ocr_cluster import cluster_detections, filter_bottom_band
 
-    interval = float(args.sample_interval or 0.5)
+    interval = float(args.sample_interval or 2.0)
     if interval <= 0:
-        interval = 0.5
+        interval = 2.0
     workdir = os.path.join(
         os.path.dirname(os.path.abspath(args.output)),
         f".ocr_work_{args.task_id}",
@@ -287,6 +312,7 @@ def main():
             frames, meta["width"], meta["height"],
             lang=str(args.lang or "ch"),
             device=str(args.device or "cpu"),
+            workers=max(1, int(args.workers or 1)),
         )
         print(f"[ocr] 有效检测 {len(dets)} 条", flush=True)
 
@@ -307,6 +333,22 @@ def main():
                 dets = filtered
             else:
                 print("[ocr] 底栏过滤结果为空,回退全画面检测", flush=True)
+
+        # 误检校验:识别不出有效文本(胸针/麦克风等图形)或置信度过低的检测,
+        # 聚类前丢弃,否则会变成 delogo 马赛克块
+        try:
+            min_rec_score = float(args.min_rec_score)
+        except (TypeError, ValueError):
+            min_rec_score = 0.6
+        if min_rec_score < 0:
+            min_rec_score = 0.0
+        before_validate = len(dets)
+        dets = filter_valid_text_dets(dets, min_score=min_rec_score)
+        print(
+            f"[ocr] 文本/置信度校验(阈值 {min_rec_score}): "
+            f"{before_validate} → {len(dets)}",
+            flush=True,
+        )
 
         max_gap = 1.5 * interval
         segments = cluster_detections(
@@ -346,4 +388,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # 结果已输出、产物已落盘;跳过解释器 teardown,规避原生库退出阶段问题
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code if isinstance(code, int) else 0)

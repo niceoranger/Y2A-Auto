@@ -116,6 +116,39 @@ class TestOcrCluster(unittest.TestCase):
         # min_y_ratio<=0 → no filter
         self.assertEqual(len(filter_bottom_band(dets, min_y_ratio=0)), 4)
 
+    def test_cluster_aggregates_texts(self):
+        dets = [
+            {"t": 0.0, "box": [0.1, 0.8, 0.8, 0.1], "score": 0.9, "text": "FORT TRUMP"},
+            {"t": 1.0, "box": [0.12, 0.81, 0.78, 0.1], "score": 0.9, "text": "FORT TRUMP"},
+            {"t": 2.0, "box": [0.11, 0.80, 0.79, 0.1], "score": 0.9, "text": "WILL COME"},
+        ]
+        segs = cluster_detections(dets, iou_threshold=0.5, max_gap_sec=1.5)
+        self.assertEqual(len(segs), 1)
+        # 文本去重收集,便于排查段内容
+        self.assertEqual(segs[0]["texts"], ["FORT TRUMP", "WILL COME"])
+
+    def test_cluster_without_text_omits_field(self):
+        dets = [
+            {"t": 0.0, "box": [0.1, 0.8, 0.8, 0.1], "score": 0.9},
+        ]
+        segs = cluster_detections(dets, iou_threshold=0.5, max_gap_sec=0.75)
+        self.assertEqual(len(segs), 1)
+        self.assertNotIn("texts", segs[0])
+
+    def test_cluster_texts_capped(self):
+        dets = [
+            {
+                "t": float(i),
+                "box": [0.1, 0.8, 0.8, 0.1],
+                "score": 0.9,
+                "text": f"line {i}",
+            }
+            for i in range(12)
+        ]
+        segs = cluster_detections(dets, iou_threshold=0.5, max_gap_sec=1.5)
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(len(segs[0]["texts"]), 8)
+
 
 if __name__ == "__main__":
     unittest.main()

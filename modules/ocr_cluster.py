@@ -92,17 +92,28 @@ def cluster_detections(
             "score_n": 1,
             "last_box": box,
             "last_t": float(d["t"]),
+            "texts": [],
         }
 
+    def _push_text(seg, d):
+        text = str(d.get("text") or "").strip()
+        if text and text not in seg["texts"] and len(seg["texts"]) < 8:
+            seg["texts"].append(text)
+
     def _finalize(seg):
-        return {
+        out = {
             "start": seg["start"],
             "end": seg["end"],
             "box": seg["box"],
             "score": seg["score_sum"] / max(1, seg["score_n"]),
         }
+        if seg.get("texts"):
+            out["texts"] = seg["texts"]
+        return out
 
-    active: List[Dict] = [_new_seg(ordered[0])]
+    first_seg = _new_seg(ordered[0])
+    _push_text(first_seg, ordered[0])
+    active: List[Dict] = [first_seg]
     results: List[Dict] = []
 
     for d in ordered[1:]:
@@ -135,8 +146,11 @@ def cluster_detections(
             seg["last_t"] = t
             seg["score_sum"] += score
             seg["score_n"] += 1
+            _push_text(seg, d)
         else:
-            active.append(_new_seg(d))
+            seg = _new_seg(d)
+            _push_text(seg, d)
+            active.append(seg)
 
     for seg in active:
         results.append(_finalize(seg))

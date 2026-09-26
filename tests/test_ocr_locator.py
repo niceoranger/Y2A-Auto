@@ -8,7 +8,12 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from modules.ocr_locator import OcrLocator
+from modules.ocr_locator import (
+    OcrLocator,
+    guess_language_from_srt_file,
+    guess_language_from_text,
+    resolve_ocr_lang,
+)
 
 
 def _write_stub_runner(path, exit_code=0, final_json=None, lines=None):
@@ -102,6 +107,78 @@ class TestOcrLocator(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("超时", str(res))
+
+    def test_min_rec_score_passed_to_runner(self):
+        args_file = os.path.join(self.tmp, "runner_args.txt")
+        body = [
+            "#!/usr/bin/env bash",
+            f"printf '%s\\n' \"$@\" > {json.dumps(args_file)}",
+            "echo '{\"ok\": true}'",
+            "exit 0",
+        ]
+        with open(self.stub, "w") as f:
+            f.write("\n".join(body) + "\n")
+        st = os.stat(self.stub)
+        os.chmod(self.stub, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        loc = OcrLocator(python_bin="/bin/bash", runner_path=self.stub)
+        ok, res = loc.locate(
+            video_path=self.video, output_json=self.out, task_id="t1",
+            min_rec_score=0.55,
+        )
+        self.assertTrue(ok, msg=str(res))
+        with open(args_file) as f:
+            args = f.read().splitlines()
+        self.assertIn("--min-rec-score", args)
+        self.assertEqual(args[args.index("--min-rec-score") + 1], "0.55")
+
+
+class TestResolveOcrLang(unittest.TestCase):
+    def test_known_iso_codes(self):
+        self.assertEqual(resolve_ocr_lang("en"), "en")
+        self.assertEqual(resolve_ocr_lang("zh"), "ch")
+        self.assertEqual(resolve_ocr_lang("ZH"), "ch")
+        self.assertEqual(resolve_ocr_lang("zh-CN"), "ch")
+        self.assertEqual(resolve_ocr_lang("ja"), "japan")
+        self.assertEqual(resolve_ocr_lang("ko"), "korean")
+        self.assertEqual(resolve_ocr_lang("fr"), "french")
+        self.assertEqual(resolve_ocr_lang("de"), "german")
+        self.assertEqual(resolve_ocr_lang("ru"), "russian")
+
+    def test_unknown_or_empty_falls_back(self):
+        self.assertEqual(resolve_ocr_lang(""), "ch")
+        self.assertEqual(resolve_ocr_lang("auto"), "ch")
+        self.assertEqual(resolve_ocr_lang("xx"), "ch")
+        self.assertEqual(resolve_ocr_lang(None, fallback="en"), "en")
+        self.assertEqual(resolve_ocr_lang("xx", fallback="en"), "en")
+        self.assertEqual(resolve_ocr_lang("xx", fallback=""), "ch")
+
+
+class TestGuessLanguage(unittest.TestCase):
+    def test_english_sample(self):
+        text = "Poland President Karol Nawrocki says it is just a matter of time before a permanent US military base is built."
+        self.assertEqual(guess_language_from_text(text), "en")
+
+    def test_chinese_sample(self):
+        text = "波兰总统表示,美军永久基地建成只是时间问题,他希望在他任期结束前完成。"
+        self.assertEqual(guess_language_from_text(text), "zh")
+
+    def test_too_short_returns_empty(self):
+        self.assertEqual(guess_language_from_text("hi"), "")
+        self.assertEqual(guess_language_from_text(""), "")
+
+    def test_srt_file_language(self):
+        srt = os.path.join(tempfile.mkdtemp(), "asr_test.srt")
+        with open(srt, "w", encoding="utf-8") as f:
+            f.write(
+                "1\n00:00:00,000 --> 00:00:03,000\n"
+                "Poland President Karol Nawrocki speaks exclusively to Bloomberg.\n\n"
+                "2\n00:00:03,000 --> 00:00:06,000\n"
+                "He says it is just a matter of time before the base is built.\n"
+            )
+        self.assertEqual(guess_language_from_srt_file(srt), "en")
+
+    def test_missing_srt_returns_empty(self):
+        self.assertEqual(guess_language_from_srt_file("/nope/missing.srt"), "")
 
 
 
