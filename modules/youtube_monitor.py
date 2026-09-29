@@ -129,6 +129,9 @@ class YouTubeMonitor:
         self._last_fetch_had_errors = False
         self._api_proxy_enabled = False
         self._last_api_init_error: Optional[str] = None
+        # httplib2 非线程安全且连接池被多个调度任务共享;API 调用与 SSL 重建
+        # 均需串行化,否则重建撕掉在途 SSL 连接会导致 OpenSSL 段错误
+        self._api_call_lock = threading.RLock()
         self._init_database()
         self._init_youtube_api()
         
@@ -1386,7 +1389,8 @@ class YouTubeMonitor:
         last_exception: Optional[Exception] = None
         while attempt < max_attempts:
             try:
-                return request.execute()
+                with self._api_call_lock:
+                    return request.execute()
             except HttpError as e:
                 # 对于5xx或已知可重试错误进行重试
                 resp = getattr(e, 'resp', None)
@@ -1406,7 +1410,16 @@ class YouTubeMonitor:
                 # 记录并重试，同时尝试重建客户端
                 last_exception = e
                 logger.warning(f"SSL错误，准备重试并重建API客户端: {str(e)}")
-                self._init_youtube_api()
+                with self._api_call_lock:
+                    self._init_youtube_api()
+                    # request 在构建时绑定了旧 httplib2 连接;重绑到新连接,
+                    # 避免重试继续在已被替换的 SSL 对象上读取
+                    new_http = self.youtube_http
+                    if new_http is not None and getattr(request, 'http', None) is not None:
+                        try:
+                            request.http = new_http
+                        except Exception:
+                            pass
             except OSError as e:
                 # 网络层错误，重试
                 last_exception = e
