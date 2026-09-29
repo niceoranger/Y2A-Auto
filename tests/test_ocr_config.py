@@ -16,7 +16,7 @@ class TestOcrConfig(unittest.TestCase):
             self.assertIn(k, DEFAULT_CONFIG)
         self.assertEqual(DEFAULT_CONFIG["OCR_PYTHON"], "/Users/mac/asr-venv/bin/python")
         self.assertEqual(DEFAULT_CONFIG["OCR_RUNNER"], "modules/ocr_runner.py")
-        self.assertEqual(DEFAULT_CONFIG["OCR_SAMPLE_INTERVAL_SEC"], 0.5)
+        self.assertEqual(DEFAULT_CONFIG["OCR_SAMPLE_INTERVAL_SEC"], 2.0)
         self.assertEqual(DEFAULT_CONFIG["OCR_LANG"], "ch")
         self.assertEqual(DEFAULT_CONFIG["OCR_DEVICE"], "cpu")
         self.assertEqual(DEFAULT_CONFIG["OCR_IOU_THRESHOLD"], 0.5)

@@ -22,6 +22,13 @@ class TestCompositeConfig(unittest.TestCase):
         self.assertIn("REMASTER_PIPELINE_ENABLED", DEFAULT_CONFIG)
         self.assertFalse(DEFAULT_CONFIG["REMASTER_PIPELINE_ENABLED"])
 
+    def test_ocr_erase_switch_off_by_default(self):
+        # 2026-09-27 放弃 OCR 字幕擦除:默认只烧译文字幕
+        self.assertIn("OCR_ENABLED", DEFAULT_CONFIG)
+        self.assertFalse(DEFAULT_CONFIG["OCR_ENABLED"])
+        source = (pathlib.Path(__file__).resolve().parents[1] / "modules" / "task_manager.py").read_text(encoding="utf-8")
+        self.assertIn("self.config.get('OCR_ENABLED', False)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

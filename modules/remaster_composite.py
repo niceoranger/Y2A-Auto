@@ -12,15 +12,16 @@ from typing import Dict, List, Optional, Tuple
 def norm_box_to_pixels(box, width: int, height: int, pad_px: int = 6) -> Tuple[int, int, int, int]:
     """归一化 [x,y,w,h](0-1) → 像素 (x,y,w,h),四周扩 pad_px,夹紧到画面内。
 
-    delogo 要求区域严格落在画面内且至少 1x1;为安全给右/下各留 1px。
+    delogo 要求区域与画面四边均至少留 1px(x/y ≥ 1,右/下 ≤ width-1/height-1),
+    贴边会报 "Logo area is outside of the frame" 导致整个滤镜图失败。
     """
     fx, fy, fw, fh = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
     x = int(round(fx * width)) - pad_px
     y = int(round(fy * height)) - pad_px
     w = int(round(fw * width)) + 2 * pad_px
     h = int(round(fh * height)) + 2 * pad_px
-    x = max(0, x)
-    y = max(0, y)
+    x = max(1, x)
+    y = max(1, y)
     w = max(1, w)
     h = max(1, h)
     if x + w > width - 1:

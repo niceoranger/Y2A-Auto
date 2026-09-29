@@ -103,7 +103,8 @@ DEFAULT_CONFIG = {
     "DUB_DEVICE": "cpu",                 # XTTS 自定义算子不支持 MPS
     "DUB_MAX_TEMPO": 1.5,                # RubberBand 最大加速倍率
     "DUB_TIMEOUT_SECONDS": 14400,        # 4h;CPU 配音慢
-    # AI 重制管线——PaddleOCR 字幕定位(复用 REMASTER 总开关)
+    # AI 重制管线——OCR 字幕定位+擦除(复用 REMASTER 总开关)
+    "OCR_ENABLED": False,                 # 子开关:默认关(2026-09-27 用户需求:放弃字幕擦除,只烧译文字幕)
     "OCR_PYTHON": "/Users/mac/asr-venv/bin/python",
     "OCR_RUNNER": "modules/ocr_runner.py",
     "OCR_SAMPLE_INTERVAL_SEC": 2.0,        # 字幕条通常持续数秒,2s 采样 + 聚类时间扩展兜底;0.5s 会把 OCR 拖到 14x 实时

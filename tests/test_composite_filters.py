@@ -22,7 +22,8 @@ class TestNormBoxToPixels(unittest.TestCase):
 
     def test_clamps_to_frame(self):
         x, y, w, h = norm_box_to_pixels([0.0, 0.0, 1.0, 1.0], 640, 360, pad_px=6)
-        self.assertEqual((x, y), (0, 0))
+        # delogo 要求区域与四边均留 1px:x/y ≥ 1
+        self.assertEqual((x, y), (1, 1))
         self.assertLessEqual(x + w, 639)
         self.assertLessEqual(y + h, 359)
 

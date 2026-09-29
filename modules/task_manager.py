@@ -3359,11 +3359,17 @@ class TaskProcessor:
         return False
 
     def _run_remaster_ocr(self, task_id, task_logger):
-        """AI 重制管线:PaddleOCR 字幕区域定位,产出 boxes JSON 落盘。
+        """AI 重制管线:OCR 字幕区域定位,产出 boxes JSON 落盘。
 
         只产中间产物落盘,不写任何下游业务字段(与 _run_remaster_demucs 边界一致);
         软失败:失败不阻断翻译/上传。
         """
+        # 2026-09-27 子开关:默认关(用户需求:放弃 OCR 字幕擦除,只正常烧录译文字幕)。
+        # 跳过即不产 boxes JSON,成片合成检测不到擦除段,不会执行 delogo/遮条。
+        if not _as_bool(self.config.get('OCR_ENABLED', False)):
+            task_logger.info("OCR 字幕擦除未启用(OCR_ENABLED=false),跳过定位,仅烧录译文字幕")
+            return False
+
         from modules.ocr_locator import OcrLocator, guess_language_from_srt_file, resolve_ocr_lang
 
         task = get_task(task_id)
