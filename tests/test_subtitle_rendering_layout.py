@@ -115,8 +115,9 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
             return_meta=True,
         )
 
-        self.assertEqual(max_lines, 5)
-        self.assertLessEqual(text.count(r'\N') + 1, 5)
+        # 2026-09-29 用户需求: 任何朝向最多 2 行。
+        self.assertEqual(max_lines, 2)
+        self.assertLessEqual(text.count(r'\N') + 1, 2)
         self.assertFalse(meta.get('overflow_warning'))
 
     def test_wrap_subtitle_text_for_ass_balances_long_cjk_text(self):
@@ -196,17 +197,16 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
 
         lines = self._extract_ass_lines(text)
         self.assertTrue(text)
-        # 恒定字号: 平衡拆分目标 ≤5 行;边界 cue 退化为不限行数的宽度安全贪心
-        # 换行(该文本 53 视觉单位/行容量 10,约需 7-8 行),不再溢出告警。
-        self.assertGreaterEqual(len(lines), 4)
-        self.assertLessEqual(len(lines), 8)
+        # 2026-09-29 两行硬上限: 该文本 53 视觉单位超过竖屏两行容量(约 37),
+        # 保持两行并置 overflow_warning,由 ASS 文档层按时间轴拆分。
+        self.assertLessEqual(len(lines), 2)
+        self.assertTrue(meta.get('overflow_warning'))
         normalized = text.replace(r'\N', '')
         self.assertIn('Release', normalized)
         self.assertIn('notes', normalized)
         self.assertIn('workflow', normalized)
         self.assertIn('status', normalized)
         self.assertFalse(any(line[:1] in '，。！？；：、)]}】）》」』' for line in lines if line))
-        self.assertFalse(meta.get('overflow_warning'))
 
     def test_portrait_long_wrap_prefers_fewer_balanced_lines(self):
         text, meta = TaskProcessor._wrap_subtitle_text_for_ass(
@@ -218,7 +218,7 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
 
         lines = self._extract_ass_lines(text)
         self.assertTrue(text)
-        self.assertLessEqual(len(lines), 5)
+        self.assertLessEqual(len(lines), 2)
         self.assertFalse(any(line[:1] in '，。！？；：、)]}】）》」』' for line in lines if line))
         self.assertFalse(meta.get('overflow_warning'))
 
@@ -301,6 +301,98 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
         self.assertEqual(len(dialogue_texts), 1)
         self.assertNotIn(r'{\fs', dialogue_texts[0])
         self.assertLessEqual(dialogue_texts[0].count(r'\N'), 1)
+
+    def test_wrap_hard_caps_two_lines_on_corpus_regressions(self):
+        """2026-09-29 用户需求: 任何朝向最多 2 行。
+
+        回归样本取自当日线上视频的真实 cue(此前被折成 3-4 行同屏)。
+        """
+        corpus_cases = [
+            # ce2209bb 0:41:24 竖版渲染为四行的横屏 cue
+            ('指数将为你带来多元化，但多元化正面临越来越大的挑战，而且我们需要认真思考。我们都在谈论被动和主动策略应该存在于组合中',
+             1920, 1080),
+            # bda17a77 0:39:27 渲染为三行的横屏 cue
+            ('现在加入我们的有更多报道的是内布拉斯加州共和党众议员迈克·弗拉德。他担任众议院金融服务委员会成员，并主持主街caucus。众议员，欢迎您再次来到彭博社',
+             1920, 1080),
+            # be4edbd1 竖屏四行 cue
+            ('设备，其大小与 Vision Pro 的电池组相当。结果是一副感觉更轻的眼镜，',
+             1080, 1920),
+            # d9033a45 竖屏四行 cue
+            ('这份名单还广泛流传给了竞争对手银行，他们借此针对名单上的人，伺机挖走客户、争夺交易',
+             1080, 1920),
+            # d22da8f6 横屏四行 cue
+            ('美国和伊朗在关于重新开放霍尔木兹海峡的谈判中似乎又回到了原点，这场长达七个月的冲突即将结束。特朗普总统在周六证实，',
+             1920, 1080),
+        ]
+        for text, vw, vh in corpus_cases:
+            with self.subTest(video=f'{vw}x{vh}', text=text[:12]):
+                wrapped, _ = TaskProcessor._wrap_subtitle_text_for_ass(
+                    text, vw, vh, return_meta=True,
+                )
+                lines = self._extract_ass_lines(wrapped)
+                self.assertLessEqual(len(lines), 2, f'{len(lines)} 行超上限: {wrapped}')
+
+    def test_medium_cue_stays_single_line_after_width_recalibration(self):
+        """宽度标定(0.72×字号/单位)后,横屏 34 单位内的 cue 应保持单行。
+
+        旧估算按 1.0×字号计宽,把实际放得下的 26-34 单位 cue 提前折成两行
+        (用户报告的"一行简短的字幕进行了换行")。
+        """
+        for text in (
+            '行业先驱兼研究员李飞飞，所以那里有点值得关注的地方',
+            '这是今天最重要的新闻',
+            '一句话里有三十来个汉字在横屏其实完全放得下不应该被折行',
+        ):
+            with self.subTest(text=text):
+                wrapped, meta = TaskProcessor._wrap_subtitle_text_for_ass(
+                    text, 1920, 1080, return_meta=True,
+                )
+                self.assertNotIn(r'\N', wrapped)
+                self.assertFalse(meta.get('forced_wrap'))
+                self.assertFalse(meta.get('overflow_warning'))
+
+    def test_ass_document_disables_libass_rewrap(self):
+        """WrapStyle=2: 渲染器不得把已定稿的两行再折出第三行。"""
+        ass_text = TaskProcessor._build_default_ass_document(
+            [{'start': 0.0, 'end': 2.0, 'text': '短句'}],
+            font_family='NotoSansCJKsc-Regular',
+            video_width=1920,
+            video_height=1080,
+        )
+
+        self.assertIn('WrapStyle: 2', ass_text)
+
+    def test_ass_document_splits_overflowing_cue_in_time(self):
+        """两行仍放不下的超长 cue:按时间轴拆成两条顺序 cue,恒定字号不缩放。"""
+        long_text = (
+            '这份名单还广泛流传给了竞争对手银行，他们借此针对名单上的人，'
+            '伺机挖走客户、争夺交易,这句话很长以至于竖屏两行也放不下'
+        )
+        ass_text = TaskProcessor._build_default_ass_document(
+            [{'start': 100.0, 'end': 104.5, 'text': long_text}],
+            font_family='NotoSansCJKsc-Regular',
+            video_width=1080,
+            video_height=1920,
+        )
+
+        dialogue_lines = [
+            line for line in ass_text.splitlines() if line.startswith('Dialogue:')
+        ]
+        self.assertEqual(len(dialogue_lines), 2)
+        first_fields = dialogue_lines[0].split(',', 9)
+        second_fields = dialogue_lines[1].split(',', 9)
+        # 顺序时间轴:第一段的结束即第二段的开始。
+        self.assertEqual(first_fields[2], second_fields[1])
+        self.assertLess(first_fields[1], first_fields[2])
+        self.assertLess(second_fields[1], second_fields[2])
+        # 每条 cue 单行,无字号覆盖。
+        for fields in (first_fields, second_fields):
+            self.assertNotIn(r'\N', fields[9])
+            self.assertNotIn(r'{\fs', fields[9])
+        self.assertEqual(
+            long_text.replace(',', '').replace('，', ''),
+            (first_fields[9] + second_fields[9]).replace(',', '').replace('，', ''),
+        )
 
 
 if __name__ == '__main__':

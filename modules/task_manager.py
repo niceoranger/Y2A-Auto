@@ -4233,6 +4233,11 @@ class TaskProcessor:
     _ASS_PORTRAIT_SIDE_MARGIN_MIN = 82.0
     _ASS_PORTRAIT_SIDE_MARGIN_MAX = 156.0
     _ASS_LANDSCAPE_LAYOUT_DENSITY = 0.93
+    # 2026-09-29 宽度标定: 实测(项目 ffmpeg+libass, fonts/ 内置字体,换 Arial/
+    # PingFang/思源结果一致)ASS FontSize=N 时每个全宽字形实际步进 ≈ 0.70N 而非
+    # 1.0N。旧估算按 1.0N 计宽,保守 1.43 倍,导致短 cue 被提前折行、两行放不下
+    # 的 cue 触发多行救援(视频出现 3-4 行字幕)。取 0.72 略高于实测下限。
+    _ASS_TEXT_WIDTH_RATIO = 0.72
     # 单行优先的"仍算单行"阈值密度。宽度安全检查(_check_ass_lines_width_safety)
     # 仍是最终裁决:超过安全宽度的 cue 会折成两行(恒定字号,不再逐条缩小)。
     _ASS_LANDSCAPE_SINGLE_LINE_DENSITY = 1.04
@@ -4862,7 +4867,8 @@ class TaskProcessor:
         max_line_length = int(round(usable_width / font_size * density))
         if is_portrait:
             max_line_length = int(cls._clamp(max_line_length, 12.0, 18.0))
-            max_lines = 3
+            # 2026-09-29 用户需求: 任何朝向最多 2 行。
+            max_lines = 2
         else:
             # Hard-coded single-line target for streaming SRT output.
             max_line_length = int(cls._clamp(max_line_length, 20.0, 26.0))
@@ -5049,19 +5055,17 @@ class TaskProcessor:
         )
         font_size = max(1.0, float(style['FontSize']))
         density = cls._ASS_PORTRAIT_LAYOUT_DENSITY if is_portrait else cls._ASS_LANDSCAPE_LAYOUT_DENSITY
-        max_line_length = int(round(usable_width / font_size * density))
+        max_line_length = int(round(usable_width / (font_size * cls._ASS_TEXT_WIDTH_RATIO) * density))
         if is_portrait:
-            # Portrait lines are capped at 14 visual units so that 5 balanced
-            # lines can absorb medium-length cues without immediately
-            # triggering overflow warnings, while still keeping the text narrow.
-            max_line_length = int(cls._clamp(max_line_length, 7.0, 14.0))
-            # Keep portrait subtitles compact: 5 lines is the hard ceiling,
-            # but the partitioner still prefers fewer balanced lines.
-            max_lines = 5
+            # 2026-09-29 用户需求: 任何朝向最多 2 行。竖屏行宽按真实字形步进
+            # (_ASS_TEXT_WIDTH_RATIO)估算,1080 宽约 18 视觉单位/行。
+            max_line_length = int(cls._clamp(max_line_length, 7.0, 19.0))
+            max_lines = 2
         else:
             # 2026-09-16 恒定字号策略: 横屏允许最多两行平衡拆分,字号恒定不再
             # 逐条缩小(逐条缩字号曾导致同视频字幕忽大忽小)。
-            max_line_length = int(cls._clamp(max_line_length, 18.0, 22.0))
+            # 2026-09-29 行宽上限同样按真实字形步进放宽(1080p 约 33 单位/行)。
+            max_line_length = int(cls._clamp(max_line_length, 18.0, 34.0))
             max_lines = 2
         return max_line_length, max_lines
 
@@ -5201,7 +5205,8 @@ class TaskProcessor:
             8.0,
             float(outline) * 2.8 + float(shadow) * 1.8 + float(font_size) * 0.14,
         )
-        return text_units * float(font_size) + padding
+        # 每视觉单位按 _ASS_TEXT_WIDTH_RATIO×FontSize 计宽(实测字形步进)。
+        return text_units * float(font_size) * cls._ASS_TEXT_WIDTH_RATIO + padding
 
     @classmethod
     def _check_ass_lines_width_safety(cls, lines, usable_width, font_size, outline, shadow):
@@ -5222,7 +5227,7 @@ class TaskProcessor:
         padding = max(6.0, float(outline) * 4.0 + float(shadow) * 2.0 + float(font_size) * 0.08)
         return max(
             float(cls._ASS_HARD_WRAP_MIN_LINE_LENGTH),
-            (safe_width - padding) / max(1.0, float(font_size)),
+            (safe_width - padding) / max(1.0, float(font_size) * cls._ASS_TEXT_WIDTH_RATIO),
         )
 
     @classmethod
@@ -5351,59 +5356,6 @@ class TaskProcessor:
                 break
 
         return best_lines
-
-    @classmethod
-    def _find_landscape_rescue_lines(
-        cls,
-        normalized,
-        *,
-        max_line_length,
-        usable_width,
-        font_size,
-        outline,
-        shadow,
-    ):
-        rescue_line_length = int(round(
-            cls._estimate_safe_line_units(
-                usable_width,
-                font_size,
-                outline,
-                shadow,
-            )
-        ))
-        rescue_line_length = int(cls._clamp(
-            rescue_line_length,
-            max_line_length,
-            cls._ASS_LANDSCAPE_SINGLE_LINE_LIMIT_MAX,
-        ))
-
-        best_lines = []
-        for line_count in (3, 4):
-            candidate_lines = cls._build_optimal_multiline_partition(
-                normalized,
-                max_line_length=rescue_line_length,
-                min_lines=line_count,
-                max_lines=line_count,
-            )
-            if not candidate_lines:
-                continue
-
-            # 2026-09-16 恒定字号: 救援行必须以基准字号直接放得下(不再考虑
-            # 逐条缩小字号的"本可放下"语义)。
-            fits, _, _, _ = cls._check_ass_lines_width_safety(
-                candidate_lines,
-                usable_width,
-                font_size,
-                outline,
-                shadow,
-            )
-            if fits:
-                return candidate_lines, True
-
-            if not best_lines:
-                best_lines = candidate_lines
-
-        return best_lines, False
 
     @classmethod
     def _find_safe_hard_wrap_lines(
@@ -5872,7 +5824,7 @@ class TaskProcessor:
         outline = float(style['Outline'])
         shadow = float(style['Shadow'])
         single_line_limit = int(cls._clamp(
-            round(usable_width / font_size * cls._ASS_LANDSCAPE_SINGLE_LINE_DENSITY),
+            round(usable_width / (font_size * cls._ASS_TEXT_WIDTH_RATIO) * cls._ASS_LANDSCAPE_SINGLE_LINE_DENSITY),
             cls._ASS_LANDSCAPE_SINGLE_LINE_LIMIT_MIN,
             cls._ASS_LANDSCAPE_SINGLE_LINE_LIMIT_MAX,
         ))
@@ -5932,75 +5884,15 @@ class TaskProcessor:
                 wrap_meta['forced_wrap'] = candidate_lines != wrapped_lines
             fits = hard_wrap_fits
 
-        # 2026-09-16 恒定字号: 竖屏平衡拆分(≤max_lines 行)放不下时,退化为不限
-        # 行数的宽度安全贪心硬换行(块内也可断开)。这比交给 libass 自动换行更可控:
-        # 断点确定、每行都过宽度安全检查;只有不可拆的超长词才保留 overflow_warning。
-        if not fits and is_portrait and max_lines <= 5:
-            portrait_fallback_lines = cls._wrap_subtitle_segment_greedily(
-                normalized,
-                max_line_length,
-            )
-            portrait_fallback_fits, _, _, _ = cls._check_ass_lines_width_safety(
-                portrait_fallback_lines,
-                usable_width,
-                font_size,
-                outline,
-                shadow,
-            )
-            if portrait_fallback_lines and portrait_fallback_fits:
-                candidate_lines = portrait_fallback_lines
-                wrap_meta['forced_wrap'] = True
-                fits = True
-
-        # Landscape rescue: only when the layout allows more than the current
-        # two lines would deeper fallbacks engage; max_lines<4 keeps this a
-        # bounded safety net rather than an open-ended wrap ladder.
-        if not fits and not is_portrait and 1 < max_lines < 4:
-            landscape_rescue_lines, landscape_rescue_fits = cls._find_landscape_rescue_lines(
-                normalized,
-                max_line_length=max_line_length,
-                usable_width=usable_width,
-                font_size=font_size,
-                outline=outline,
-                shadow=shadow,
-            )
-            if landscape_rescue_lines:
-                candidate_lines = landscape_rescue_lines
-                wrap_meta['forced_wrap'] = True
-                fits = landscape_rescue_fits
-            elif not landscape_rescue_lines:
-                rescue_lines, rescue_fits = cls._find_safe_hard_wrap_lines(
-                    normalized,
-                    max_line_length=max(max_line_length - 1, cls._ASS_HARD_WRAP_MIN_LINE_LENGTH),
-                    max_lines=3,
-                    usable_width=usable_width,
-                    font_size=font_size,
-                    outline=outline,
-                    shadow=shadow,
-                )
-                if rescue_lines:
-                    candidate_lines = rescue_lines
-                    wrap_meta['forced_wrap'] = True
-                    fits = rescue_fits
-
-            if not fits and not landscape_rescue_lines:
-                deep_rescue_lines, deep_rescue_fits = cls._find_safe_hard_wrap_lines(
-                    normalized,
-                    max_line_length=max(max_line_length - 2, cls._ASS_HARD_WRAP_MIN_LINE_LENGTH),
-                    max_lines=4,
-                    usable_width=usable_width,
-                    font_size=font_size,
-                    outline=outline,
-                    shadow=shadow,
-                )
-                if deep_rescue_lines:
-                    candidate_lines = deep_rescue_lines
-                    wrap_meta['forced_wrap'] = True
-                    fits = deep_rescue_fits
+        # 2026-09-29 用户需求: 任何朝向最多 2 行。两行仍放不下的超长 cue 不再
+        # 追加行数(旧竖屏不限行贪心与横屏 3-4 行救援分支均已删除),保持两行并
+        # 置 overflow_warning,由 ASS 文档层(_build_default_ass_document)按
+        # 时间轴拆分成两条 cue 分时显示。
+        candidate_lines = cls._limit_wrapped_lines(candidate_lines, max_lines)
 
         # 2026-09-16 恒定字号: 逐条缩字号已彻底移除,Dialogue 一律使用样式基准
-        # 字号。放不下的 cue 依赖上方换行/救援链;残余超宽仅置 overflow_warning,
-        # 交给 libass 自动换行(WrapStyle)。
+        # 字号。残余超宽仅置 overflow_warning;WrapStyle=2 禁止 libass 二次
+        # 换行,屏幕上不会出现第三行。
         if not fits and candidate_lines:
             wrap_meta['overflow_warning'] = True
 
@@ -6207,6 +6099,42 @@ class TaskProcessor:
 
         return resolved_font
 
+    # 2026-09-29 两行硬上限配套:超长 cue 按时间轴拆分的时长门槛。
+    _ASS_OVERFLOW_SPLIT_MIN_DURATION = 2.0
+    _ASS_OVERFLOW_SPLIT_MIN_PART = 0.8
+
+    @classmethod
+    def _split_overflowing_ass_cue(cls, cue, ass_text, wrap_meta):
+        """两行仍放不下的超长 cue:按两行边界拆成两条顺序 cue,分时显示。
+
+        恒定字号不动(不逐条缩字号);时长按两行视觉单位比例分配,每段至少
+        _ASS_OVERFLOW_SPLIT_MIN_PART 秒,否则保持原样(避免闪帧)。
+        返回 [(start, end, ass_text), ...]。
+        """
+        start = float((cue or {}).get('start', 0.0) or 0.0)
+        end = float((cue or {}).get('end', 0.0) or 0.0)
+        default = [(start, end, ass_text)]
+        if not wrap_meta.get('overflow_warning'):
+            return default
+        lines = [line for line in str(ass_text or '').split(r'\N') if line]
+        if len(lines) != 2:
+            return default
+        duration = end - start
+        if duration < cls._ASS_OVERFLOW_SPLIT_MIN_DURATION:
+            return default
+        first_units = cls._estimate_subtitle_text_units(lines[0])
+        second_units = cls._estimate_subtitle_text_units(lines[1])
+        total_units = first_units + second_units
+        if total_units <= 0:
+            return default
+        split_at = start + duration * (first_units / total_units)
+        if split_at - start < cls._ASS_OVERFLOW_SPLIT_MIN_PART or end - split_at < cls._ASS_OVERFLOW_SPLIT_MIN_PART:
+            return default
+        return [
+            (start, split_at, lines[0]),
+            (split_at, end, lines[1]),
+        ]
+
     @classmethod
     def _build_default_ass_document(
         cls,
@@ -6229,7 +6157,9 @@ class TaskProcessor:
             "ScriptType: v4.00+\n"
             f"PlayResX: {style['PlayResX']}\n"
             f"PlayResY: {style['PlayResY']}\n"
-            "WrapStyle: 0\n"
+            # WrapStyle=2: 禁止 libass 自动换行。断行完全由 _wrap_subtitle_text_for_ass
+            # 决定(最多 2 行),渲染器不得把已定稿的行再折出第三/四行。
+            "WrapStyle: 2\n"
             "ScaledBorderAndShadow: yes\n"
             "Collisions: Normal\n"
             "\n"
@@ -6285,13 +6215,19 @@ class TaskProcessor:
                 font_override_count += 1
             if wrap_meta.get('overflow_warning'):
                 overflow_warning_count += 1
-            ass_lines.append(
-                "Dialogue: 0,"
-                f"{cls._seconds_to_ass_timestamp(cue_dict.get('start', 0.0))},"
-                f"{cls._seconds_to_ass_timestamp(cue_dict.get('end', 0.0))},"
-                "Default,,0,0,0,,"
-                f"{text}"
-            )
+            # 2026-09-29 两行硬上限:溢出 cue 按时间轴拆成两条顺序 cue。
+            for sub_start, sub_end, sub_text in cls._split_overflowing_ass_cue(
+                cue_dict,
+                text,
+                wrap_meta,
+            ):
+                ass_lines.append(
+                    "Dialogue: 0,"
+                    f"{cls._seconds_to_ass_timestamp(sub_start)},"
+                    f"{cls._seconds_to_ass_timestamp(sub_end)},"
+                    "Default,,0,0,0,,"
+                    f"{sub_text}"
+                )
 
         body = '\n'.join(ass_lines)
         if body:
