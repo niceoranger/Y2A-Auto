@@ -2983,7 +2983,7 @@ def cleanup_downloads_route():
     result = cleanup_downloads(hours)
     
     if result.get('success'):
-        flash(f"下载内容清理成功，删除了{result['dirs_removed']}个目录、{result['files_removed']}个文件，释放了{result['bytes_freed_readable']}空间", 'success')
+        flash(f"下载内容清理成功，删除了{result['files_removed']}个媒体文件，释放了{result['bytes_freed_readable']}空间（字幕/元数据已保留）", 'success')
     else:
         flash(f"下载内容清理失败: {result.get('error', '未知错误')}", 'danger')
     
@@ -3079,37 +3079,21 @@ def clear_specific_logs():
 
 
 def cleanup_downloads(hours: int):
-    """清理下载目录中指定hours之前的任务目录"""
+    """清理已完成任务目录中超过保留期的视频/音频等媒体大文件。
+
+    2026-09-30 用户需求:只保留最近三天下载的视频。仅处理 completed 且不在
+    运行中的任务;字幕、ASS、元数据、封面等小文件保留,断点续跑不受影响。
+    """
     try:
-        downloads_dir = get_app_subdir('downloads')
-        if not os.path.exists(downloads_dir):
-            return {'success': True, 'dirs_removed': 0, 'files_removed': 0, 'bytes_freed': 0, 'bytes_freed_readable': '0B'}
-
-        cutoff = time.time() - float(hours) * 3600
-        dirs_removed = 0
-        files_removed = 0
-        bytes_freed = 0
-
-        for entry in os.listdir(downloads_dir):
-            path = os.path.join(downloads_dir, entry)
-            try:
-                if os.path.isdir(path):
-                    # check last modification
-                    mtime = os.path.getmtime(path)
-                    if mtime < cutoff:
-                        # accumulate size
-                        for root, dirs, files in os.walk(path):
-                            for f in files:
-                                fp = os.path.join(root, f)
-                                if os.path.exists(fp):
-                                    bytes_freed += os.path.getsize(fp)
-                                    files_removed += 1
-                        shutil.rmtree(path)
-                        dirs_removed += 1
-            except Exception:
-                continue
-
-        return {'success': True, 'dirs_removed': dirs_removed, 'files_removed': files_removed, 'bytes_freed': bytes_freed, 'bytes_freed_readable': _human_readable_size(bytes_freed)}
+        from modules.task_manager import cleanup_expired_task_media
+        files_removed, bytes_freed = cleanup_expired_task_media(hours)
+        return {
+            'success': True,
+            'dirs_removed': 0,
+            'files_removed': files_removed,
+            'bytes_freed': bytes_freed,
+            'bytes_freed_readable': _human_readable_size(bytes_freed),
+        }
     except Exception as e:
         logger.warning(f"下载内容清理失败: {e}")
         return {'success': False, 'error': str(e)}

@@ -2019,6 +2019,104 @@ def delete_task_files(task_id):
 
     return True
 
+# 下载保留期清理:只删任务目录内的大媒体文件,保留字幕/ASS/元数据/封面等小文件
+CLEANABLE_MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.flv', '.ts', '.wav', '.m4a', '.mp3'}
+
+
+def _parse_task_datetime_for_cleanup(value):
+    """解析任务表里的时间字段(updated_at/created_at 兼容空格与 T 分隔)。"""
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+        try:
+            return datetime.strptime(str(value)[:19], fmt)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def cleanup_expired_task_media(retention_hours, log=None):
+    """按保留期清理已完成任务的下载媒体文件。
+
+    2026-09-30 用户需求:只保留最近三天下载的视频(默认 72 小时)。
+    与旧版整目录 rmtree 不同:仅处理状态为 completed 且不在运行中的任务,
+    只删除视频/音频等大文件,字幕、ASS、元数据、封面全部保留;待处理/
+    处理中/失败可续传的任务一律跳过,避免破坏断点续跑。
+
+    Args:
+        retention_hours: 保留最近多少小时
+        log: 可选 logger
+
+    Returns:
+        (files_removed, bytes_freed)
+    """
+    log = log or logger
+    try:
+        retention_hours = float(retention_hours)
+    except (TypeError, ValueError):
+        log.warning(f"下载保留期配置无效,跳过清理: {retention_hours!r}")
+        return 0, 0
+    if retention_hours <= 0:
+        return 0, 0
+
+    cutoff = datetime.now() - timedelta(hours=retention_hours)
+    files_removed = 0
+    bytes_freed = 0
+
+    for task in get_all_tasks():
+        task_id = str(task.get('id') or '')
+        if not task_id or task.get('status') != TASK_STATES['COMPLETED']:
+            continue
+        if _is_task_active(task_id):
+            continue
+
+        task_dir = os.path.join(DOWNLOADS_DIR, task_id)
+        if not os.path.isdir(task_dir):
+            continue
+
+        finished_at = _parse_task_datetime_for_cleanup(task.get('updated_at'))
+        if finished_at is None:
+            # 数据库时间缺失时退化为目录内最新文件的 mtime
+            try:
+                finished_at = max(
+                    datetime.fromtimestamp(os.path.getmtime(os.path.join(task_dir, name)))
+                    for name in os.listdir(task_dir)
+                )
+            except (OSError, ValueError):
+                continue
+        if finished_at >= cutoff:
+            continue
+
+        task_files_removed = 0
+        task_bytes_freed = 0
+        for name in os.listdir(task_dir):
+            if os.path.splitext(name)[1].lower() not in CLEANABLE_MEDIA_EXTENSIONS:
+                continue
+            media_path = os.path.join(task_dir, name)
+            try:
+                if not os.path.isfile(media_path):
+                    continue
+                size = os.path.getsize(media_path)
+                os.remove(media_path)
+                task_files_removed += 1
+                task_bytes_freed += size
+            except OSError as exc:
+                log.warning(f"下载清理: 删除 {task_id}/{name} 失败: {exc}")
+
+        if task_files_removed:
+            files_removed += task_files_removed
+            bytes_freed += task_bytes_freed
+            log.info(
+                f"下载清理: 任务 {task_id} 完成于 {finished_at.strftime('%Y-%m-%d %H:%M')},"
+                f"删除 {task_files_removed} 个媒体文件,"
+                f"释放 {task_bytes_freed / 1024 ** 3:.2f}GB(字幕/元数据已保留)"
+            )
+
+    if files_removed:
+        log.info(
+            f"下载保留期清理完成: 保留 {retention_hours:.0f} 小时,"
+            f"共删除 {files_removed} 个媒体文件,释放 {bytes_freed / 1024 ** 3:.2f}GB"
+        )
+    return files_removed, bytes_freed
+
 # 全局上传队列锁
 upload_queue_lock = threading.Lock()
 upload_semaphore = None

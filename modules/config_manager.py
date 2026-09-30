@@ -33,7 +33,9 @@ DEFAULT_CONFIG = {
     "LOG_CLEANUP_ENABLED": True, # 是否启用日志自动清理
     "LOG_CLEANUP_HOURS": 72, # 保留最近多少小时的日志
     "LOG_CLEANUP_INTERVAL": 12, # 日志清理间隔（小时）
-    "DOWNLOAD_CLEANUP_ENABLED": False, # 是否启用下载内容自动清理
+    # 2026-09-30 用户需求:只保留最近三天下载的视频(默认开启,72小时=3天)。
+    # 仅清理已完成任务的媒体大文件,字幕/ASS/元数据/封面保留,断点续跑不受影响。
+    "DOWNLOAD_CLEANUP_ENABLED": True, # 是否启用下载内容自动清理
     "DOWNLOAD_CLEANUP_HOURS": 72, # 保留最近多少小时的下载内容
     "DOWNLOAD_CLEANUP_INTERVAL": 24, # 下载内容清理间隔（小时）
     # 主动消息推送
