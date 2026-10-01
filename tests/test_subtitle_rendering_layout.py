@@ -394,6 +394,87 @@ class SubtitleRenderingLayoutTests(unittest.TestCase):
             (first_fields[9] + second_fields[9]).replace(',', '').replace('，', ''),
         )
 
+    def test_wrap_aligns_two_lines_to_sentence_boundaries(self):
+        """2026-09-30 阅读习惯:两行拆分优先对齐句子边界。
+
+        一行里不得同时出现上一句的尾巴和下一句的开头。
+        """
+        text, meta = TaskProcessor._wrap_subtitle_text_for_ass(
+            '我们在全球有250万家企业。企业板块环比增长了100%，这是一个非常惊人的数字。',
+            1920,
+            1080,
+            return_meta=True,
+        )
+
+        lines = self._extract_ass_lines(text)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].endswith('。'), f'首行应以句号收尾: {lines[0]}')
+        self.assertTrue(lines[1].endswith('。'), f'次行应以句号收尾: {lines[1]}')
+
+    def test_portrait_wrap_aligns_to_sentence_boundaries(self):
+        text, _ = TaskProcessor._wrap_subtitle_text_for_ass(
+            '设备，其大小与 Vision Pro 的电池组相当。结果是一副感觉更轻的眼镜，',
+            1080,
+            1920,
+            return_meta=True,
+        )
+
+        lines = self._extract_ass_lines(text)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].endswith('。'), f'首行应以句号收尾: {lines[0]}')
+
+    def test_multi_sentence_cue_displays_sequentially_in_time(self):
+        """句子组超过两行时按时间轴逐句分时,每条 cue 都是完整句子。"""
+        long_text = (
+            '现在加入我们的有更多报道的是内布拉斯加州共和党众议员迈克·弗拉德。'
+            '他担任众议院金融服务委员会成员，并主持主街caucus。'
+            '众议员，欢迎您再次来到彭博社'
+        )
+        ass_text = TaskProcessor._build_default_ass_document(
+            [{'start': 10.0, 'end': 15.66, 'text': long_text}],
+            font_family='NotoSansCJKsc-Regular',
+            video_width=1920,
+            video_height=1080,
+        )
+
+        dialogue_lines = [
+            line for line in ass_text.splitlines() if line.startswith('Dialogue:')
+        ]
+        self.assertEqual(len(dialogue_lines), 3)
+        fields = [line.split(',', 9) for line in dialogue_lines]
+        # 时间轴连续且单调。
+        for prev_fields, curr_fields in zip(fields, fields[1:]):
+            self.assertEqual(prev_fields[2], curr_fields[1])
+            self.assertLess(prev_fields[1], prev_fields[2])
+        # 每条 cue 单行且在句末收尾(末条允许无标点结尾)。
+        for idx, cue_fields in enumerate(fields):
+            self.assertNotIn(r'\N', cue_fields[9])
+            if idx < len(fields) - 1:
+                self.assertTrue(cue_fields[9].endswith('。'), f'第{idx + 1}条应在句末收尾: {cue_fields[9]}')
+        # 内容守恒(忽略标点空白差异)。
+        joined = ''.join(cue_fields[9] for cue_fields in fields)
+        self.assertEqual(joined.replace('·', ''), long_text.replace('·', ''))
+        self.assertNotIn(r'{\fs', joined)
+
+    def test_sentence_split_fallback_keeps_two_line_cap_when_duration_short(self):
+        """时长不足以逐句分时(每段至少 0.8s)时,兜底展示仍不超过两行。"""
+        long_text = (
+            '第一句先说个结论。第二句展开讲讲原因和背景。第三句给一个具体的例子。'
+            '第四句总结收尾。第五句展望未来。'
+        )
+        ass_text = TaskProcessor._build_default_ass_document(
+            [{'start': 0.0, 'end': 1.9, 'text': long_text}],
+            font_family='NotoSansCJKsc-Regular',
+            video_width=1920,
+            video_height=1080,
+        )
+
+        dialogue_lines = [
+            line for line in ass_text.splitlines() if line.startswith('Dialogue:')
+        ]
+        self.assertEqual(len(dialogue_lines), 1)
+        self.assertLessEqual(dialogue_lines[0].split(',', 9)[9].count(r'\N'), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

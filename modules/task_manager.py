@@ -4342,6 +4342,13 @@ class TaskProcessor:
     # 1.0N。旧估算按 1.0N 计宽,保守 1.43 倍,导致短 cue 被提前折行、两行放不下
     # 的 cue 触发多行救援(视频出现 3-4 行字幕)。取 0.72 略高于实测下限。
     _ASS_TEXT_WIDTH_RATIO = 0.72
+    # 2026-09-30 用户需求(阅读习惯): 换行/分时拆分优先对齐句子边界,避免一行里
+    # 同时出现上一句的尾巴和下一句的开头。
+    _ASS_SENTENCE_END_CHARS = '。！？…!?'
+    _ASS_SENTENCE_TAIL_CHARS = '”’』」）)]'
+    # 句子组打包上限相对安全行宽的宽容度: 组内句子合计允许略超安全宽度
+    # (WrapStyle=2 兜底不折行),换取行界严格对齐句子。
+    _ASS_SENTENCE_GROUP_TOLERANCE = 1.08
     # 单行优先的"仍算单行"阈值密度。宽度安全检查(_check_ass_lines_width_safety)
     # 仍是最终裁决:超过安全宽度的 cue 会折成两行(恒定字号,不再逐条缩小)。
     _ASS_LANDSCAPE_SINGLE_LINE_DENSITY = 1.04
@@ -5023,14 +5030,28 @@ class TaskProcessor:
             18.0,
             28.0,
         ))
-        wrapped_lines = cls._build_wrapped_lines_for_ass(
-            normalized,
-            is_portrait=is_portrait,
-            max_line_length=max_line_length,
-            max_lines=max_lines,
-            single_line_limit=single_line_limit,
-            aggressive=False,
+        # 2026-09-30 阅读习惯: 拆行优先对齐句子边界(竖屏两行场景)。
+        sentence_units_limit = cls._estimate_safe_line_units(
+            usable_width,
+            font_size,
+            outline,
+            shadow,
+        ) * cls._ASS_SENTENCE_GROUP_TOLERANCE
+        sentence_lines = cls._split_sentences_into_groups(normalized, sentence_units_limit)
+        sentence_aligned = bool(sentence_lines) and (
+            len(sentence_lines) == 1 or (max_lines >= 2 and len(sentence_lines) == 2)
         )
+        if sentence_aligned:
+            wrapped_lines = sentence_lines
+        else:
+            wrapped_lines = cls._build_wrapped_lines_for_ass(
+                normalized,
+                is_portrait=is_portrait,
+                max_line_length=max_line_length,
+                max_lines=max_lines,
+                single_line_limit=single_line_limit,
+                aggressive=False,
+            )
         fits, _, _, _ = cls._check_ass_lines_width_safety(
             wrapped_lines,
             usable_width,
@@ -5038,7 +5059,8 @@ class TaskProcessor:
             outline,
             shadow,
         )
-        if not fits:
+        # 句子对齐结果不做硬换行回退(那会重新引入跨句混行)。
+        if not fits and not sentence_aligned:
             hard_wrap_lines, _ = cls._find_safe_hard_wrap_lines(
                 normalized,
                 max_line_length=max_line_length,
@@ -5333,6 +5355,96 @@ class TaskProcessor:
             float(cls._ASS_HARD_WRAP_MIN_LINE_LENGTH),
             (safe_width - padding) / max(1.0, float(font_size) * cls._ASS_TEXT_WIDTH_RATIO),
         )
+
+    @classmethod
+    def _sentence_end_positions(cls, text):
+        """返回句子结束边界位置(句末标点及其后紧跟的收尾引号/括号之后)。
+
+        行尾的句末标点不构成边界(其后没有下一句)。
+        """
+        segment = str(text or '')
+        ends = []
+        for idx, char in enumerate(segment):
+            if char not in cls._ASS_SENTENCE_END_CHARS:
+                continue
+            end = idx + 1
+            while end < len(segment) and segment[end] in cls._ASS_SENTENCE_TAIL_CHARS:
+                end += 1
+            if 0 < end < len(segment):
+                ends.append(end)
+        return ends
+
+    @classmethod
+    def _sentence_slices(cls, text):
+        """按句子边界切片;无内嵌句末标点时返回 []。"""
+        segment = str(text or '').strip()
+        if not segment:
+            return []
+        ends = cls._sentence_end_positions(segment)
+        if not ends:
+            return []
+        slices = []
+        prev = 0
+        for end in ends:
+            slices.append(segment[prev:end])
+            prev = end
+        slices.append(segment[prev:])
+        return slices
+
+    @classmethod
+    def _balanced_sentence_two_groups(cls, normalized, max_units):
+        """在句子边界上把文本切成尽量均衡的两组,每组 ≤ max_units。
+
+        优先保证两行各自是完整句子的组合且宽度不超限;找不到可行边界返回 []。
+        """
+        slices = cls._sentence_slices(normalized)
+        if len(slices) < 2:
+            return []
+        best_groups = []
+        best_diff = None
+        left_units = 0.0
+        for idx in range(len(slices) - 1):
+            left_units += cls._estimate_subtitle_text_units(slices[idx])
+            left_text = ''.join(slices[:idx + 1]).strip()
+            right_text = ''.join(slices[idx + 1:]).strip()
+            right_units = cls._estimate_subtitle_text_units(right_text)
+            if left_units > max_units or right_units > max_units:
+                continue
+            diff = abs(left_units - right_units)
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_groups = [left_text, right_text]
+        return [group for group in best_groups if group]
+
+    @classmethod
+    def _split_sentences_into_groups(cls, normalized, max_units):
+        """把整段文字按句子边界贪心打包成若干组,每组 ≤ max_units 视觉单位。
+
+        绝不拆开单个句子;存在单句超过 max_units 时返回 [](调用方回退到
+        通用平衡换行,该场景句子本身必须行内折断,无法对齐)。
+        返回组数 ≥ 2 的列表;全部句子能装进一组时返回 [整段]。
+        """
+        slices = cls._sentence_slices(normalized)
+        if not slices:
+            return []
+
+        groups = []
+        current = ''
+        current_units = 0.0
+        for piece in slices:
+            piece_units = cls._estimate_subtitle_text_units(piece)
+            if piece_units > max_units:
+                return []
+            if current and current_units + piece_units > max_units:
+                groups.append(current.strip())
+                current = piece
+                current_units = piece_units
+            else:
+                current += piece
+                current_units += piece_units
+        if current.strip():
+            groups.append(current.strip())
+        return [group for group in groups if group]
 
     @classmethod
     def _score_partition_line(cls, line, target_units, max_line_length, *, is_last):
@@ -5933,8 +6045,20 @@ class TaskProcessor:
             cls._ASS_LANDSCAPE_SINGLE_LINE_LIMIT_MAX,
         ))
 
+        # 2026-09-30 阅读习惯: 拆行优先对齐句子边界。两句各自放得下就各占一行;
+        # 句子组超过两行(≥3 组)时把组列表交给 ASS 文档层按时间轴逐句分时显示,
+        # 这里保留通用两行兜底(时长不足无法分时时)。单句超宽等对齐失败场景
+        # 才回退通用平衡换行。
+        sentence_units_limit = cls._estimate_safe_line_units(
+            usable_width,
+            font_size,
+            outline,
+            shadow,
+        ) * cls._ASS_SENTENCE_GROUP_TOLERANCE
+
         # Single-line priority: keep the whole cue on one line if it fits at
         # the base font size; otherwise wrap at constant font size.
+        single_kept = False
         if prefer_single_line:
             single_line = [normalized]
             single_fits, _, _, _ = cls._check_ass_lines_width_safety(
@@ -5946,6 +6070,28 @@ class TaskProcessor:
             )
             if single_fits:
                 wrapped_lines = single_line
+                single_kept = True
+
+        if not single_kept:
+            sentence_two = cls._balanced_sentence_two_groups(normalized, sentence_units_limit)
+            greedy_groups = cls._split_sentences_into_groups(normalized, sentence_units_limit)
+            if sentence_two:
+                # 均衡两组:两行各自是完整句子的组合。
+                wrapped_lines = sentence_two
+                wrap_meta['forced_wrap'] = True
+            elif len(greedy_groups) == 2:
+                wrapped_lines = greedy_groups
+                wrap_meta['forced_wrap'] = True
+            elif len(greedy_groups) > 2:
+                wrapped_lines = cls._build_wrapped_lines_for_ass(
+                    normalized,
+                    is_portrait=is_portrait,
+                    max_line_length=max_line_length,
+                    max_lines=max_lines,
+                    single_line_limit=single_line_limit,
+                    aggressive=False,
+                )
+                wrap_meta['sentence_split_lines'] = greedy_groups
             else:
                 wrapped_lines = cls._build_wrapped_lines_for_ass(
                     normalized,
@@ -5955,38 +6101,43 @@ class TaskProcessor:
                     single_line_limit=single_line_limit,
                     aggressive=False,
                 )
-        else:
-            wrapped_lines = cls._build_wrapped_lines_for_ass(
-                normalized,
-                is_portrait=is_portrait,
-                max_line_length=max_line_length,
-                max_lines=max_lines,
-                single_line_limit=single_line_limit,
-                aggressive=False,
-            )
 
-        fits, _, _, _ = cls._check_ass_lines_width_safety(
-            wrapped_lines,
-            usable_width,
-            font_size,
-            outline,
-            shadow,
-        )
         candidate_lines = wrapped_lines
-        if not fits:
-            hard_wrap_lines, hard_wrap_fits = cls._find_safe_hard_wrap_lines(
-                normalized,
-                max_line_length=max_line_length,
-                max_lines=max_lines,
-                usable_width=usable_width,
-                font_size=font_size,
-                outline=outline,
-                shadow=shadow,
+        sentence_aligned = not single_kept and (
+            wrapped_lines is sentence_two or wrapped_lines is greedy_groups
+        ) and len(wrapped_lines) <= 2
+        if sentence_aligned:
+            # 句子对齐结果不做硬换行回退(那会重新引入跨句混行);超出安全
+            # 宽度仅置 overflow_warning,由文档层决定是否分时拆分。
+            fits, _, _, _ = cls._check_ass_lines_width_safety(
+                candidate_lines,
+                usable_width,
+                font_size,
+                outline,
+                shadow,
             )
-            if hard_wrap_lines:
-                candidate_lines = hard_wrap_lines
-                wrap_meta['forced_wrap'] = candidate_lines != wrapped_lines
-            fits = hard_wrap_fits
+        else:
+            fits, _, _, _ = cls._check_ass_lines_width_safety(
+                wrapped_lines,
+                usable_width,
+                font_size,
+                outline,
+                shadow,
+            )
+            if not fits:
+                hard_wrap_lines, hard_wrap_fits = cls._find_safe_hard_wrap_lines(
+                    normalized,
+                    max_line_length=max_line_length,
+                    max_lines=max_lines,
+                    usable_width=usable_width,
+                    font_size=font_size,
+                    outline=outline,
+                    shadow=shadow,
+                )
+                if hard_wrap_lines:
+                    candidate_lines = hard_wrap_lines
+                    wrap_meta['forced_wrap'] = candidate_lines != wrapped_lines
+                fits = hard_wrap_fits
 
         # 2026-09-29 用户需求: 任何朝向最多 2 行。两行仍放不下的超长 cue 不再
         # 追加行数(旧竖屏不限行贪心与横屏 3-4 行救援分支均已删除),保持两行并
@@ -6000,6 +6151,7 @@ class TaskProcessor:
         if not fits and candidate_lines:
             wrap_meta['overflow_warning'] = True
 
+        wrap_meta['wrap_lines'] = [line for line in candidate_lines if str(line or '').strip()]
         ass_text = cls._compose_ass_dialogue_text(candidate_lines)
         return (ass_text, wrap_meta) if return_meta else ass_text
 
@@ -6208,36 +6360,57 @@ class TaskProcessor:
     _ASS_OVERFLOW_SPLIT_MIN_PART = 0.8
 
     @classmethod
-    def _split_overflowing_ass_cue(cls, cue, ass_text, wrap_meta):
-        """两行仍放不下的超长 cue:按两行边界拆成两条顺序 cue,分时显示。
+    def _split_ass_cue_in_time(cls, cue, lines):
+        """把一条 cue 按行/句子组拆成多条顺序 cue,分时显示。
 
-        恒定字号不动(不逐条缩字号);时长按两行视觉单位比例分配,每段至少
-        _ASS_OVERFLOW_SPLIT_MIN_PART 秒,否则保持原样(避免闪帧)。
-        返回 [(start, end, ass_text), ...]。
+        恒定字号不动(不逐条缩字号);时长按各组视觉单位比例分配,每段至少
+        _ASS_OVERFLOW_SPLIT_MIN_PART 秒,组数过多或时长不足时保持整条原样
+        (避免闪帧)。lines 为未转义的原始行;返回 [(start, end, 已转义文本)]。
         """
         start = float((cue or {}).get('start', 0.0) or 0.0)
         end = float((cue or {}).get('end', 0.0) or 0.0)
-        default = [(start, end, ass_text)]
-        if not wrap_meta.get('overflow_warning'):
+        groups = [str(line or '').strip() for line in (lines or []) if str(line or '').strip()]
+        # 兜底展示同样遵守两行硬上限:组数超限时合并回两行。
+        fallback_text = r'\N'.join(
+            cls._escape_ass_text_line(line) for line in cls._limit_wrapped_lines(groups, 2)
+        )
+        default = [(start, end, fallback_text)]
+        if len(groups) < 2:
             return default
-        lines = [line for line in str(ass_text or '').split(r'\N') if line]
-        if len(lines) != 2:
-            return default
+        escaped_lines = [cls._escape_ass_text_line(group) for group in groups]
+
         duration = end - start
         if duration < cls._ASS_OVERFLOW_SPLIT_MIN_DURATION:
             return default
-        first_units = cls._estimate_subtitle_text_units(lines[0])
-        second_units = cls._estimate_subtitle_text_units(lines[1])
-        total_units = first_units + second_units
+        units = [cls._estimate_subtitle_text_units(group) for group in groups]
+        total_units = sum(units)
         if total_units <= 0:
             return default
-        split_at = start + duration * (first_units / total_units)
-        if split_at - start < cls._ASS_OVERFLOW_SPLIT_MIN_PART or end - split_at < cls._ASS_OVERFLOW_SPLIT_MIN_PART:
-            return default
-        return [
-            (start, split_at, lines[0]),
-            (split_at, end, lines[1]),
-        ]
+
+        n = len(groups)
+        cuts = []
+        cumulative = 0.0
+        for units_value in units[:-1]:
+            cumulative += units_value
+            cuts.append(start + duration * (cumulative / total_units))
+        for idx, cut in enumerate(cuts):
+            if cut - start < cls._ASS_OVERFLOW_SPLIT_MIN_PART * (idx + 1):
+                return default
+            if end - cut < cls._ASS_OVERFLOW_SPLIT_MIN_PART * (n - 1 - idx):
+                return default
+        prev_cut = start
+        for cut in cuts:
+            if cut <= prev_cut:
+                return default
+            prev_cut = cut
+
+        events = []
+        segment_start = start
+        for cut, escaped_text in zip(cuts, escaped_lines[:-1]):
+            events.append((segment_start, cut, escaped_text))
+            segment_start = cut
+        events.append((segment_start, end, escaped_lines[-1]))
+        return events
 
     @classmethod
     def _build_default_ass_document(
@@ -6319,12 +6492,27 @@ class TaskProcessor:
                 font_override_count += 1
             if wrap_meta.get('overflow_warning'):
                 overflow_warning_count += 1
-            # 2026-09-29 两行硬上限:溢出 cue 按时间轴拆成两条顺序 cue。
-            for sub_start, sub_end, sub_text in cls._split_overflowing_ass_cue(
-                cue_dict,
-                text,
-                wrap_meta,
-            ):
+            # 2026-09-30 阅读习惯: 句子组超过两行的 cue 按句子分时显示(每条
+            # 完整句子独占一条 cue);两行仍溢出的 cue 沿用两行分时拆分。
+            sentence_groups = [
+                group for group in (wrap_meta.get('sentence_split_lines') or [])
+                if str(group or '').strip()
+            ]
+            if len(sentence_groups) >= 3:
+                sub_cues = cls._split_ass_cue_in_time(cue_dict, sentence_groups)
+            elif wrap_meta.get('overflow_warning'):
+                wrap_lines = [
+                    line for line in (wrap_meta.get('wrap_lines') or [])
+                    if str(line or '').strip()
+                ]
+                sub_cues = cls._split_ass_cue_in_time(cue_dict, wrap_lines)
+            else:
+                sub_cues = [(
+                    float(cue_dict.get('start', 0.0) or 0.0),
+                    float(cue_dict.get('end', 0.0) or 0.0),
+                    text,
+                )]
+            for sub_start, sub_end, sub_text in sub_cues:
                 ass_lines.append(
                     "Dialogue: 0,"
                     f"{cls._seconds_to_ass_timestamp(sub_start)},"
