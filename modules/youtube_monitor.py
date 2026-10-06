@@ -844,7 +844,13 @@ class YouTubeMonitor:
     def run_monitor(self, config_id: int) -> Tuple[bool, str]:
         """执行监控任务"""
         logger.info(f"开始执行监控任务，配置ID: {config_id}")
-        
+
+        # 调度间隔(≥60分钟)远超代理空闲超时,缓存的 keep-alive 连接此时已被
+        # 代理断开,直接复用必然触发 SSL record layer failure;每轮先重建
+        # 客户端(纯本地操作,不发请求)用新鲜连接开始,避免固定的首次失败+重试
+        with self._api_call_lock:
+            self._init_youtube_api()
+
         # 添加调试日志 - 检查 YouTube API 对象状态
         logger.debug(f"YouTube API 对象状态: {type(self.youtube)}, 值: {self.youtube}")
         if not self.youtube:
