@@ -12,7 +12,7 @@ import shutil
 import threading
 import gc
 import shlex
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 import re
 import unicodedata
@@ -2252,6 +2252,12 @@ class TaskProcessor:
         self._current_max_concurrent_uploads = _as_int(self.config.get('MAX_CONCURRENT_UPLOADS', 1), 1, minimum=1)
         self._runtime_limit_refresh_pending = False
         self._last_deferred_limit_signature = None
+
+        # 定时分批上传:当前批次放行的任务ID集合 + 上一个已触发窗口点
+        # (重启后基线取最近已过窗口点,不追旧账,从下一个时间点开始正常触发)
+        self._upload_batch_ids = set()
+        self._last_upload_window = None
+        self._upload_batch_lock = threading.Lock()
         
         # 初始化上传信号量
         init_upload_semaphore(self._current_max_concurrent_uploads)
@@ -2773,6 +2779,10 @@ class TaskProcessor:
                     completed_stages = _mark_stage_done(task_id, completed_stages, PIPELINE_STAGE_UPLOAD_TO_ACFUN)
                 elif PIPELINE_STAGE_UPLOAD_TO_ACFUN in completed_stages:
                     task_logger.info("跳过上传（checkpoint已完成）")
+                elif not self._upload_batch_allowed(task_id):
+                    # 定时分批上传:窗口外只处理不上传,收尾逻辑会标记为"准备上传",
+                    # 等批量触发时作为PENDING重入,checkpoint推断会直达上传阶段
+                    task_logger.info("定时上传已启用，任务转入待上传队列，等待下一个上传时间点")
                 else:
                     self._upload_to_target(task_id, task_logger)
                     _raise_if_cancelled(task_id, task_logger)
@@ -2840,6 +2850,148 @@ class TaskProcessor:
             
             threading.Thread(target=delayed_check, daemon=True).start()
     
+    def _upload_batch_allowed(self, task_id):
+        """定时分批上传:判断该任务当前是否允许进入上传阶段。
+
+        未启用定时上传时恒为True(维持处理完即上传的原行为);
+        启用后仅允许"批量触发时放行"的任务上传,其余任务停在准备上传状态等下个时间点。
+        """
+        if not self.config.get('UPLOAD_SCHEDULE_ENABLED', False):
+            return True
+        with self._upload_batch_lock:
+            return task_id in self._upload_batch_ids
+
+    @staticmethod
+    def _parse_hhmm(text):
+        """解析单个 HH:MM 字符串,非法返回 None"""
+        try:
+            hour_str, minute_str = str(text).strip().split(':')
+            hour, minute = int(hour_str), int(minute_str)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return (hour, minute)
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    def _get_upload_schedule_times(self):
+        """解析配置的上传时间点列表,返回排序后的 (hour, minute) 元组列表"""
+        from .config_manager import load_config
+        raw = str(load_config().get('UPLOAD_SCHEDULE_TIMES') or '')
+        times = set()
+        for part in raw.split(','):
+            parsed = self._parse_hhmm(part)
+            if parsed:
+                times.add(parsed)
+        return sorted(times)
+
+    def _get_upload_final_time(self):
+        """解析当天兜底上传时刻,未配置或非法返回 None"""
+        from .config_manager import load_config
+        return self._parse_hhmm(load_config().get('UPLOAD_SCHEDULE_FINAL_TIME'))
+
+    @staticmethod
+    def _get_upload_sort_time(task):
+        """批量上传排序时间戳:视频下载时间优先,缺失时逐级兜底。
+
+        优先取本地媒体文件的修改时间(视频→元数据→封面,epoch秒,最贴近"早下载早发"),
+        文件均不可用时回退任务创建时间(UTC文本转epoch,接近信息采集时间)。
+        """
+        for path_key in ('video_path_local', 'metadata_json_path_local', 'cover_path_local'):
+            path = task.get(path_key)
+            if isinstance(path, str) and path and os.path.exists(path):
+                try:
+                    return os.path.getmtime(path)
+                except OSError:
+                    continue
+        try:
+            dt = datetime.strptime(str(task.get('created_at') or ''), '%Y-%m-%d %H:%M:%S')
+            return dt.replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            return 0.0
+
+    def check_and_flush_upload_batch(self):
+        """分钟级tick:跨过配置的上传时间点时,把"准备上传"任务批量入队。
+
+        主时段限量入队(UPLOAD_SCHEDULE_BATCH_LIMIT,0=不限),按任务创建时间
+        先来先传,溢出的保持"准备上传"状态顺延到下一时段;
+        当天兜底时刻(UPLOAD_SCHEDULE_FINAL_TIME)一次性清空剩余,不限量。
+        幂等安全:同一窗口点只触发一次;无待上传任务时空转。
+        入队方式为改回PENDING后走常规调度(并发信号量+断点续跑),
+        checkpoint推断使重入任务直接到达上传阶段,不重复下载/字幕等流程。
+        """
+        try:
+            if not self.config.get('UPLOAD_SCHEDULE_ENABLED', False):
+                return
+            from .config_manager import load_config
+
+            times = self._get_upload_schedule_times()
+            final_hm = self._get_upload_final_time()
+            all_points = list(times)
+            if final_hm and final_hm not in all_points:
+                all_points.append(final_hm)
+            if not all_points:
+                return
+
+            now = datetime.now()
+            last_due = None
+            for hour, minute in all_points:
+                due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if due <= now and (last_due is None or due > last_due):
+                    last_due = due
+            if last_due is None:
+                # 今天所有时间点都还没到,基线取昨天最后一个点
+                hour, minute = sorted(all_points)[-1]
+                last_due = (now - timedelta(days=1)).replace(
+                    hour=hour, minute=minute, second=0, microsecond=0
+                )
+
+            with self._upload_batch_lock:
+                if self._last_upload_window is None:
+                    # 启动基线:只认下一个时间点,不追旧账
+                    self._last_upload_window = last_due
+                    return
+                if last_due <= self._last_upload_window:
+                    return
+                self._last_upload_window = last_due
+
+            ready_tasks = get_tasks_by_status(TASK_STATES['READY_FOR_UPLOAD'])
+            if not ready_tasks:
+                logger.info("定时上传窗口到达:当前没有待上传任务")
+                return
+
+            # 早下载早发:按视频下载完成时间排序(文件不可用时逐级兜底)
+            ready_tasks.sort(key=self._get_upload_sort_time)
+            is_final = bool(final_hm) and (last_due.hour, last_due.minute) == final_hm
+            batch_limit = _as_int(load_config().get('UPLOAD_SCHEDULE_BATCH_LIMIT'), 10, minimum=0)
+            if is_final or not batch_limit:
+                batch_tasks = ready_tasks
+            else:
+                batch_tasks = ready_tasks[:batch_limit]
+
+            batch_ids = [task['id'] for task in batch_tasks if task.get('id')]
+            if not batch_ids:
+                logger.info("定时上传窗口到达:待上传任务均无有效ID,跳过")
+                return
+            overflow_count = len(ready_tasks) - len(batch_ids)
+
+            with self._upload_batch_lock:
+                self._upload_batch_ids.update(batch_ids)
+            if is_final:
+                logger.info(f"定时上传兜底时刻到达:一次性清空剩余 {len(batch_ids)} 个待上传任务")
+            elif overflow_count > 0:
+                logger.info(
+                    f"定时上传窗口到达:本轮入队 {len(batch_ids)} 个(单时段上限 {batch_limit}),"
+                    f"溢出 {overflow_count} 个顺延至下一时段"
+                )
+            else:
+                logger.info(f"定时上传窗口到达:本轮 {len(batch_ids)} 个待上传任务批量入队")
+
+            for task_id in batch_ids:
+                update_task(task_id, status=TASK_STATES['PENDING'])
+            self._check_and_start_next_pending_task()
+        except Exception as e:
+            logger.error(f"定时上传批量触发失败: {str(e)}")
+
     def _check_and_start_next_pending_task(self):
         """检查并启动下一个pending任务"""
         try:
@@ -8175,12 +8327,75 @@ class TaskProcessor:
 
         return get_task(task_id)
     
+    def _apply_duration_prefix(self, task_id, task_logger):
+        """按视频时长给上传标题加分类前缀(快讯/解析/专家解读),幂等。
+
+        前缀写入上传实际使用的标题字段(translated优先,否则original);
+        重试/重传时检测到已有任一分类前缀则跳过,不会叠加。
+        取不到时长(文件缺失/ffprobe失败)时保持原标题不变。
+        """
+        try:
+            if not self.config.get('UPLOAD_TITLE_PREFIX_ENABLED', False):
+                return
+            task = get_task(task_id)
+            if not task:
+                return
+
+            title_field = (
+                'video_title_translated'
+                if _normalize_task_text(task.get('video_title_translated'))
+                else 'video_title_original'
+            )
+            title = str(task.get(title_field) or '').strip()
+            if not title:
+                return
+
+            prefixes = [
+                str(self.config.get('UPLOAD_TITLE_PREFIX_SHORT') or ''),
+                str(self.config.get('UPLOAD_TITLE_PREFIX_MEDIUM') or ''),
+                str(self.config.get('UPLOAD_TITLE_PREFIX_LONG') or ''),
+            ]
+            prefixes = [p for p in prefixes if p]
+            if not prefixes:
+                return
+            if any(title.startswith(p) for p in prefixes):
+                return  # 幂等:已有分类前缀,重试不叠加
+
+            video_path = task.get('video_path_local')
+            if not isinstance(video_path, str) or not video_path or not os.path.exists(video_path):
+                task_logger.warning("按时长加前缀:本地视频文件不存在，保持原标题")
+                return
+            duration_seconds = self._get_video_duration(video_path, task_logger)
+            if not duration_seconds:
+                task_logger.warning("按时长加前缀:未能获取视频时长，保持原标题")
+                return
+
+            minutes = duration_seconds / 60.0
+            short_max = _as_int(self.config.get('UPLOAD_TITLE_PREFIX_SHORT_MAX_MIN'), 10, minimum=1)
+            medium_max = _as_int(self.config.get('UPLOAD_TITLE_PREFIX_MEDIUM_MAX_MIN'), 30, minimum=short_max + 1)
+            if minutes < short_max:
+                prefix = str(self.config.get('UPLOAD_TITLE_PREFIX_SHORT') or '')
+            elif minutes < medium_max:
+                prefix = str(self.config.get('UPLOAD_TITLE_PREFIX_MEDIUM') or '')
+            else:
+                prefix = str(self.config.get('UPLOAD_TITLE_PREFIX_LONG') or '')
+            if not prefix:
+                return
+
+            update_task(task_id, **{title_field: f"{prefix}{title}"})
+            task_logger.info(f"按时长({minutes:.0f}分钟)为标题添加分类前缀: {prefix}")
+        except Exception as e:
+            task_logger.warning(f"按时长加标题前缀失败(忽略,保持原标题): {e}")
+
     def _upload_to_target(self, task_id, task_logger, allow_missing_translations=False):
         """按任务平台分发上传实现。"""
         task = get_task(task_id)
         if not task:
             task_logger.error("任务不存在")
             return
+
+        # 按时长给上传标题加分类前缀(幂等,失败不影响上传)
+        self._apply_duration_prefix(task_id, task_logger)
 
         # 无字幕发布门禁：ASR 未生成字幕的任务一律不发布（可重试）
         if task.get('subtitle_qc_failed') == 1 and task.get('subtitle_qc_reason') == 'asr_no_subtitle':

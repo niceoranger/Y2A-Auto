@@ -38,6 +38,22 @@ DEFAULT_CONFIG = {
     "DOWNLOAD_CLEANUP_ENABLED": True, # 是否启用下载内容自动清理
     "DOWNLOAD_CLEANUP_HOURS": 72, # 保留最近多少小时的下载内容
     "DOWNLOAD_CLEANUP_INTERVAL": 24, # 下载内容清理间隔（小时）
+    # 2026-10-04 用户需求:任务处理完成后不立即上传,每天按固定时间点分批上传。
+    # 到点时把所有"准备上传"状态的任务批量入队;关闭则维持处理完即上传的原行为。
+    "UPLOAD_SCHEDULE_ENABLED": False, # 是否启用定时分批上传
+    "UPLOAD_SCHEDULE_TIMES": "08:00,12:00,18:00", # 每天的上传时间点,逗号分隔 HH:MM
+    # 2026-10-05 用户需求:单个时段上传条数限量,溢出顺延到下一时段;
+    # 当天最后剩余的在兜底时刻一次性清空(不限量)。
+    "UPLOAD_SCHEDULE_BATCH_LIMIT": 10,   # 每个时段最多上传条数,0=不限
+    "UPLOAD_SCHEDULE_FINAL_TIME": "20:00",  # 当天兜底上传时刻(清空剩余);留空禁用
+    # 2026-10-04 用户需求:上传标题按时长加分类前缀。
+    # 时长按 ffprobe 实测视频时长计算;前缀写入标题字段,重试时幂等跳过。
+    "UPLOAD_TITLE_PREFIX_ENABLED": False, # 是否启用时长分类前缀
+    "UPLOAD_TITLE_PREFIX_SHORT": "【快讯】",       # 时长 < SHORT_MAX_MIN 的前缀
+    "UPLOAD_TITLE_PREFIX_SHORT_MAX_MIN": 10,      # 快讯时长上限(分钟,不含)
+    "UPLOAD_TITLE_PREFIX_MEDIUM": "【解析】",      # SHORT_MAX_MIN <= 时长 < MEDIUM_MAX_MIN 的前缀
+    "UPLOAD_TITLE_PREFIX_MEDIUM_MAX_MIN": 30,     # 解析时长上限(分钟,不含)
+    "UPLOAD_TITLE_PREFIX_LONG": "【专家解读】",    # 时长 >= MEDIUM_MAX_MIN 的前缀
     # 主动消息推送
     "NOTIFY_ENABLED": False,
     "NOTIFY_EVENT_TASK_ADDED": True,

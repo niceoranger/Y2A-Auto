@@ -760,6 +760,7 @@ def _perform_settings_save(form_data: dict, uploads: dict, operation_id: str | N
             'RECOMMEND_PARTITION_WITH_COVER', 'CONTENT_MODERATION_ENABLED',
             'OPENAI_THINKING_ENABLED', 'SUBTITLE_OPENAI_THINKING_ENABLED', 'SUBTITLE_QC_THINKING_ENABLED',
             'LOG_CLEANUP_ENABLED', 'SUBTITLE_TRANSLATION_ENABLED', 'SUBTITLE_EMBED_IN_VIDEO',
+            'UPLOAD_SCHEDULE_ENABLED', 'UPLOAD_TITLE_PREFIX_ENABLED',
             'SUBTITLE_KEEP_ORIGINAL', 'YOUTUBE_AUTO_GENERATED_SUBTITLES_ENABLED',
             'YOUTUBE_PROXY_ENABLED', 'YOUTUBE_API_PROXY_ENABLED', 'password_protection_enabled',
             'SPEECH_RECOGNITION_ENABLED',
@@ -799,6 +800,7 @@ def _perform_settings_save(form_data: dict, uploads: dict, operation_id: str | N
             'SUBTITLE_RETRY_DELAY', 'SUBTITLE_MAX_WORKERS', 'YOUTUBE_DOWNLOAD_THREADS',
             'YOUTUBE_DOWNLOAD_MAX_HEIGHT',
             'LOGIN_MAX_FAILED_ATTEMPTS', 'LOGIN_LOCKOUT_MINUTES', 'LOGIN_SESSION_TIMEOUT_MINUTES',
+            'UPLOAD_SCHEDULE_BATCH_LIMIT',
             'VAD_SILERO_MIN_SPEECH_MS',
             'VAD_SILERO_MIN_SILENCE_MS', 'VAD_SILERO_MAX_SPEECH_S',
             'VAD_SILERO_SPEECH_PAD_MS', 'VAD_MAX_SEGMENT_S',
@@ -3207,6 +3209,29 @@ def schedule_download_cleanup():
         return None
 
 
+def schedule_upload_batch():
+    """定时分批上传:分钟级tick,跨过配置的上传时间点时批量入队待上传任务。
+
+    tick不判断开关(开关由flush方法内部读取),保证设置页改配置后无需重启即生效。
+    """
+    try:
+        scheduler = BackgroundScheduler()
+        def _job():
+            try:
+                from modules.task_manager import get_global_task_processor
+                processor = get_global_task_processor(load_config())
+                if processor:
+                    processor.check_and_flush_upload_batch()
+            except Exception as e:
+                logger.warning(f"定时上传tick执行失败: {e}")
+        scheduler.add_job(_job, 'interval', minutes=1, id='upload_schedule_flush', replace_existing=True)
+        scheduler.start()
+        return scheduler
+    except Exception as e:
+        logger.warning(f"启动定时上传调度器失败: {e}")
+        return None
+
+
 # YouTube监控系统路由
 @app.route('/youtube_monitor')
 @login_required
@@ -3690,6 +3715,9 @@ if __name__ == '__main__':
 
     # 设置下载内容清理定时任务
     download_cleanup_scheduler = schedule_download_cleanup()
+
+    # 设置定时分批上传调度器
+    upload_batch_scheduler = schedule_upload_batch()
 
     try:
         # macOS AirPlay 接收器占用 5000，默认改用 5001

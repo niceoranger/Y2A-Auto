@@ -1871,6 +1871,51 @@
                                         </article>
                                     </div>
 
+                                    <div class="col-md-6">
+                                        <article class="settings-card">
+                                            <div class="settings-card-header">
+                                                <div>
+                                                    <span class="section-eyebrow">上传管理</span>
+                                                    <h4>定时分批上传</h4>
+                                                </div>
+                                            </div>
+                                            <div class="settings-card-body">
+                                                <label class="checkbox-label mb-3">
+                                                    <input type="checkbox" name="UPLOAD_SCHEDULE_ENABLED" {% if config.get('UPLOAD_SCHEDULE_ENABLED', False) %}checked{% endif %}>
+                                                    启用定时分批上传
+                                                </label>
+                                                <div class="form-group">
+                                                    <label for="upload-schedule-times" class="form-label">每天上传时间点（逗号分隔，24小时制）</label>
+                                                    <input type="text" id="upload-schedule-times" name="UPLOAD_SCHEDULE_TIMES" value="{{ config.get('UPLOAD_SCHEDULE_TIMES', '08:00,12:00,18:00') }}" class="form-control" placeholder="08:00,12:00,18:00">
+                                                </div>
+                                                <div class="row g-3">
+                                                    <div class="col-md-6">
+                                                        <div class="form-group">
+                                                            <label for="upload-batch-limit" class="form-label">单时段最多上传（条）</label>
+                                                            <input type="number" id="upload-batch-limit" name="UPLOAD_SCHEDULE_BATCH_LIMIT" value="{{ config.get('UPLOAD_SCHEDULE_BATCH_LIMIT', 10) }}" min="0" max="100" class="form-control">
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-md-6">
+                                                        <div class="form-group">
+                                                            <label for="upload-final-time" class="form-label">当天兜底上传时刻</label>
+                                                            <input type="text" id="upload-final-time" name="UPLOAD_SCHEDULE_FINAL_TIME" value="{{ config.get('UPLOAD_SCHEDULE_FINAL_TIME', '20:00') }}" class="form-control" placeholder="20:00">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="help-text mt-2">
+                                                    启用后，任务处理完成不立即上传，而是等待上传时间点分批上传：每个时间点最多上传设定的条数（按任务创建先后排序，0 为不限），溢出的自动顺延到下一个时间点；当天最后剩余的在兜底时刻一次性全部上传（兜底时刻留空则禁用）。
+                                                </div>
+                                                <label class="checkbox-label mb-3 mt-3">
+                                                    <input type="checkbox" name="UPLOAD_TITLE_PREFIX_ENABLED" {% if config.get('UPLOAD_TITLE_PREFIX_ENABLED', False) %}checked{% endif %}>
+                                                    启用按时长分类标题前缀
+                                                </label>
+                                                <div class="help-text">
+                                                    启用后上传标题按时长自动加前缀：不满 10 分钟加【快讯】、10–30 分钟加【解析】、30 分钟以上加【专家解读】。前缀与分钟阈值可在 config.json 中调整（UPLOAD_TITLE_PREFIX_* 配置项）。
+                                                </div>
+                                            </div>
+                                        </article>
+                                    </div>
+
                                     <div class="col-12">
                                         <article class="settings-card">
                                             <div class="settings-card-header">
