@@ -2898,6 +2898,17 @@ class TaskProcessor:
         """
         try:
             if not self.config.get('UPLOAD_SCHEDULE_ENABLED', False):
+                # 开关关闭=维持"处理完即上传"。开关开启期间被拦进"准备上传"
+                # 的任务在关闭后没有任何路径会重新入队,会永久滞留;
+                # 此处放行积压任务(ready状态必然不在处理中,改回PENDING安全,
+                # 空转时仅一次空查询)。
+                ready = get_tasks_by_status(TASK_STATES['READY_FOR_UPLOAD'])
+                if ready:
+                    logger.info(f"定时上传已关闭:放行积压的 {len(ready)} 个待上传任务")
+                    for task in ready:
+                        if task.get('id'):
+                            update_task(task['id'], status=TASK_STATES['PENDING'])
+                    self._check_and_start_next_pending_task()
                 return
             from .config_manager import load_config
 
