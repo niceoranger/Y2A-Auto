@@ -296,6 +296,17 @@ DEFAULT_CONFIG = inject_speech_pipeline_defaults(DEFAULT_CONFIG)
 # Prompt 中心默认键（4 组翻译 Prompt 的 mode + text）
 DEFAULT_CONFIG.update(_get_prompt_default_entries())
 
+# 密钥类配置：设置页不回显已存值（防HTML源码泄露），保存时提交空值表示
+# "保持不变"，仅在填写了新值时才覆盖；需要清除密钥时直接编辑 config/config.json。
+_SECRET_CONFIG_KEYS = frozenset({
+    'password', 'COOKIECLOUD_PASSWORD',
+    'OPENAI_API_KEY', 'SUBTITLE_OPENAI_API_KEY', 'SUBTITLE_QC_API_KEY',
+    'AI_SEGMENTATION_API_KEY', 'WHISPER_API_KEY', 'VOXTRAL_API_KEY',
+    'YOUTUBE_API_KEY', 'YOUTUBE_API_PROXY_PASSWORD', 'YOUTUBE_PROXY_PASSWORD',
+    'ALIYUN_ACCESS_KEY_ID', 'ALIYUN_ACCESS_KEY_SECRET',
+    'NOTIFY_SERVERCHAN_SENDKEY', 'NOTIFY_MESSAGE_PUSHER_TOKEN',
+})
+
 
 def normalize_youtube_download_quality_mode(value):
     normalized = str(value or _YOUTUBE_DOWNLOAD_QUALITY_MODE_DEFAULT).strip().lower()
@@ -506,8 +517,9 @@ def update_config(new_config):
             # 特殊处理布尔值
             if isinstance(DEFAULT_CONFIG[key], bool):
                 current_config[key] = str(new_config[key]).lower() in ['true', '1', 'on']
-            elif key in ('password', 'COOKIECLOUD_PASSWORD'):
-                if str(new_config[key]).strip(): # Only update password if a new one is provided
+            elif key in _SECRET_CONFIG_KEYS:
+                # 密钥字段设置页不回显，空值表示"保持不变"，仅在提供新值时覆盖
+                if str(new_config[key]).strip():
                     current_config[key] = new_config[key]
             elif key == 'VIDEO_ENCODER':
                 # 支持硬件编码：auto/cpu/nvidia/intel/amd

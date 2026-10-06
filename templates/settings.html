@@ -359,13 +359,13 @@
                                                     <div class="col-md-6">
                                                         <div class="form-group">
                                                             <label for="aliyun-key" class="form-label">AccessKey ID</label>
-                                                            <input type="password" id="aliyun-key" name="ALIYUN_ACCESS_KEY_ID" value="{{ config.ALIYUN_ACCESS_KEY_ID }}" class="form-control">
+                                                            <input type="password" id="aliyun-key" name="ALIYUN_ACCESS_KEY_ID" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('ALIYUN_ACCESS_KEY_ID') else '' }}">
                                                         </div>
                                                     </div>
                                                     <div class="col-md-6">
                                                         <div class="form-group">
                                                             <label for="aliyun-secret" class="form-label">AccessKey Secret</label>
-                                                            <input type="password" id="aliyun-secret" name="ALIYUN_ACCESS_KEY_SECRET" value="{{ config.ALIYUN_ACCESS_KEY_SECRET }}" class="form-control">
+                                                            <input type="password" id="aliyun-secret" name="ALIYUN_ACCESS_KEY_SECRET" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('ALIYUN_ACCESS_KEY_SECRET') else '' }}">
                                                         </div>
                                                     </div>
                                                     <div class="col-md-6">
@@ -544,7 +544,7 @@
                                                     <div class="col-md-6">
                                                         <div class="form-group">
                                                             <label for="youtube-proxy-password" class="form-label">代理密码</label>
-                                                            <input type="password" id="youtube-proxy-password" name="YOUTUBE_PROXY_PASSWORD" value="{{ config.get('YOUTUBE_PROXY_PASSWORD', '') }}" class="form-control" placeholder="可选">
+                                                            <input type="password" id="youtube-proxy-password" name="YOUTUBE_PROXY_PASSWORD" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('YOUTUBE_PROXY_PASSWORD') else '可选' }}">
                                                         </div>
                                                     </div>
                                                     <div class="col-md-6">
@@ -682,7 +682,7 @@
                                                         <div class="col-md-6">
                                                             <div class="form-group">
                                                                 <label for="openai-key" class="form-label">OpenAI API 密钥</label>
-                                                                <input type="password" id="openai-key" name="OPENAI_API_KEY" value="{{ config.OPENAI_API_KEY }}" class="form-control">
+                                                                <input type="password" id="openai-key" name="OPENAI_API_KEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('OPENAI_API_KEY') else '' }}">
                                                             </div>
                                                         </div>
                                                         <div class="col-md-6">
@@ -717,7 +717,7 @@
                                                         <div class="col-md-6">
                                                             <div class="form-group">
                                                                 <label for="subtitle-openai-key" class="form-label">字幕专用 API 密钥</label>
-                                                                <input type="password" id="subtitle-openai-key" name="SUBTITLE_OPENAI_API_KEY" value="{{ config.get('SUBTITLE_OPENAI_API_KEY', '') }}" class="form-control" placeholder="留空则沿用全局">
+                                                                <input type="password" id="subtitle-openai-key" name="SUBTITLE_OPENAI_API_KEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('SUBTITLE_OPENAI_API_KEY') else '留空则沿用全局' }}">
                                                             </div>
                                                         </div>
                                                         <div class="col-md-6">
@@ -752,7 +752,7 @@
                                                         <div class="col-md-6">
                                                             <div class="form-group">
                                                                 <label for="subtitle-qc-key" class="form-label">质检专用 API 密钥</label>
-                                                                <input type="password" id="subtitle-qc-key" name="SUBTITLE_QC_API_KEY" value="{{ config.get('SUBTITLE_QC_API_KEY', '') }}" class="form-control" placeholder="留空则沿用字幕翻译专用密钥/全局密钥">
+                                                                <input type="password" id="subtitle-qc-key" name="SUBTITLE_QC_API_KEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('SUBTITLE_QC_API_KEY') else '留空则沿用字幕翻译专用密钥/全局密钥' }}">
                                                             </div>
                                                         </div>
                                                         <div class="col-md-6">
@@ -832,7 +832,7 @@
                                                     <div class="col-md-6">
                                                         <div class="form-group">
                                                             <label for="whisper-api-key" class="form-label">Whisper API 密钥</label>
-                                                            <input type="password" id="whisper-api-key" name="WHISPER_API_KEY" value="{{ config.get('WHISPER_API_KEY', '') }}" class="form-control" placeholder="留空沿用 OpenAI 密钥">
+                                                            <input type="password" id="whisper-api-key" name="WHISPER_API_KEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('WHISPER_API_KEY') else '留空沿用 OpenAI 密钥' }}">
                                                         </div>
                                                     </div>
                                                     <div class="col-md-6">
@@ -991,7 +991,7 @@
                                                     <div class="col-md-6">
                                                         <div class="form-group">
                                                             <label for="voxtral-api-key" class="form-label">Voxtral API 密钥</label>
-                                                            <input type="password" id="voxtral-api-key" name="VOXTRAL_API_KEY" value="{{ config.get('VOXTRAL_API_KEY', '') }}" class="form-control" placeholder="Mistral API 密钥">
+                                                            <input type="password" id="voxtral-api-key" name="VOXTRAL_API_KEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('VOXTRAL_API_KEY') else 'Mistral API 密钥' }}">
                                                         </div>
                                                     </div>
                                                     <div class="col-md-6">
@@ -1203,7 +1203,7 @@
                                                         <div class="col-md-6">
                                                             <div class="form-group">
                                                                 <label for="ai-seg-key" class="form-label">智能分段专用 API 密钥</label>
-                                                                <input type="password" id="ai-seg-key" name="AI_SEGMENTATION_API_KEY" value="{{ config.get('AI_SEGMENTATION_API_KEY', '') }}" class="form-control" placeholder="留空则沿用全局">
+                                                                <input type="password" id="ai-seg-key" name="AI_SEGMENTATION_API_KEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('AI_SEGMENTATION_API_KEY') else '留空则沿用全局' }}">
                                                             </div>
                                                         </div>
                                                         <div class="col-md-6">
@@ -1723,7 +1723,7 @@
                                                         </label>
                                                         <div class="form-group mb-3">
                                                             <label for="notify-serverchan-sendkey" class="form-label">SendKey</label>
-                                                            <input type="password" id="notify-serverchan-sendkey" name="NOTIFY_SERVERCHAN_SENDKEY" value="{{ config.get('NOTIFY_SERVERCHAN_SENDKEY', '') }}" class="form-control" autocomplete="off" placeholder="SCTxxxxxxxxxxxxxxxx">
+                                                            <input type="password" id="notify-serverchan-sendkey" name="NOTIFY_SERVERCHAN_SENDKEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('NOTIFY_SERVERCHAN_SENDKEY') else 'SCTxxxxxxxxxxxxxxxx' }}">
                                                         </div>
                                                         <div class="settings-inline-actions">
                                                             <button type="button" class="btn btn-outline-primary notify-test-btn" data-channel="serverchan">
@@ -1764,7 +1764,7 @@
                                                             <div class="col-md-6">
                                                                 <div class="form-group">
                                                                     <label for="notify-message-pusher-token" class="form-label">Token</label>
-                                                                    <input type="password" id="notify-message-pusher-token" name="NOTIFY_MESSAGE_PUSHER_TOKEN" value="{{ config.get('NOTIFY_MESSAGE_PUSHER_TOKEN', '') }}" class="form-control" autocomplete="off">
+                                                                    <input type="password" id="notify-message-pusher-token" name="NOTIFY_MESSAGE_PUSHER_TOKEN" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('NOTIFY_MESSAGE_PUSHER_TOKEN') else '' }}">
                                                                 </div>
                                                             </div>
                                                             <div class="col-md-6">
@@ -1994,7 +1994,7 @@
                                                     <div class="col-12">
                                                         <div class="form-group">
                                                             <label for="youtube-api-key" class="form-label">YouTube Data API v3 密钥</label>
-                                                            <input type="password" id="youtube-api-key" name="YOUTUBE_API_KEY" value="{{ config.YOUTUBE_API_KEY }}" class="form-control">
+                                                            <input type="password" id="youtube-api-key" name="YOUTUBE_API_KEY" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('YOUTUBE_API_KEY') else '' }}">
                                                             <p class="help-text">配置后可在 <a href="{{ url_for('youtube_monitor_index') }}">YouTube 监控</a> 页面启用自动监控。</p>
                                                         </div>
                                                     </div>
@@ -2026,7 +2026,7 @@
                                                     <div class="col-md-6">
                                                         <div class="form-group">
                                                             <label for="youtube-api-proxy-password" class="form-label">监控 API 代理密码</label>
-                                                            <input type="password" id="youtube-api-proxy-password" name="YOUTUBE_API_PROXY_PASSWORD" value="{{ config.get('YOUTUBE_API_PROXY_PASSWORD', '') }}" class="form-control" placeholder="可选">
+                                                            <input type="password" id="youtube-api-proxy-password" name="YOUTUBE_API_PROXY_PASSWORD" class="form-control" autocomplete="off" placeholder="{{ '已配置，留空保持不变' if config.get('YOUTUBE_API_PROXY_PASSWORD') else '可选' }}">
                                                         </div>
                                                     </div>
                                                 </div>

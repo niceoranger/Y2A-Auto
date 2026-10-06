@@ -18,7 +18,7 @@ from functools import wraps
 from flask_cors import CORS
 from PIL import Image, UnidentifiedImageError
 from werkzeug.security import safe_join
-from modules.youtube_handler import extract_video_urls_from_playlist
+from modules.youtube_handler import extract_video_urls_from_playlist, _is_safe_video_url
 from modules.utils import get_app_subdir
 from modules.config_manager import load_config, update_config, reset_specific_config
 from modules.whisper_languages import WHISPER_LANGUAGE_LIST
@@ -1909,6 +1909,13 @@ def add_task_via_extension():
         if not youtube_url:
             return jsonify({'success': False, 'message': 'YouTube URL不能为空'}), 400
 
+        # 单视频链接走与播放列表一致的严格校验，防止把 -- 开头的伪URL当yt-dlp选项注入
+        if 'youtube.com/playlist' not in youtube_url and 'youtu.be/playlist' not in youtube_url:
+            safe_url = _is_safe_video_url(youtube_url, logger)
+            if not safe_url:
+                return jsonify({'success': False, 'message': '无效的YouTube视频URL（仅支持 youtube.com/youtu.be 的视频链接）'}), 400
+            youtube_url = safe_url
+
         config = load_config()
         if not upload_target:
             upload_target = config.get('UPLOAD_TARGET_DEFAULT', 'acfun')
@@ -1977,6 +1984,14 @@ def add_task_route():
     if not youtube_url:
         flash('YouTube URL不能为空', 'danger')
         return redirect(url_for('tasks'))
+
+    # 单视频链接走与播放列表一致的严格校验，防止把 -- 开头的伪URL当yt-dlp选项注入
+    if 'youtube.com/playlist' not in youtube_url and 'youtu.be/playlist' not in youtube_url:
+        safe_url = _is_safe_video_url(youtube_url, logger)
+        if not safe_url:
+            flash('无效的YouTube视频URL（仅支持 youtube.com/youtu.be 的视频链接）', 'danger')
+            return redirect(url_for('tasks'))
+        youtube_url = safe_url
 
     config = load_config()
     if not upload_target:
@@ -3722,9 +3737,12 @@ if __name__ == '__main__':
     try:
         # macOS AirPlay 接收器占用 5000，默认改用 5001
         port = int(os.environ.get('PORT', 5001))
-        logger.info(f"服务启动，监听地址: http://127.0.0.1:{port}")
+        # 默认仅监听本机回环：应用默认未启用密码保护且设置页含密钥配置，
+        # 绑定 0.0.0.0 会把全部功能暴露给局域网。需要局域网访问时设 HOST=0.0.0.0。
+        host = str(os.environ.get('HOST', '127.0.0.1')).strip() or '127.0.0.1'
+        logger.info(f"服务启动，监听地址: http://{host}:{port}")
         # 使用标准Flask运行
-        app.run(host='0.0.0.0', port=port, debug=False)
+        app.run(host=host, port=port, debug=False)
     except KeyboardInterrupt:
         logger.info("接收到退出信号，服务正在关闭...")
     except Exception as e:
