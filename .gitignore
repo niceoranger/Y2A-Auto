@@ -66,3 +66,6 @@ tests/*
 .uv-cache/
 .uv-python/
 build-tools/Y2A-Auto.spec
+
+# oh-my-claudecode runtime state
+.omc/
