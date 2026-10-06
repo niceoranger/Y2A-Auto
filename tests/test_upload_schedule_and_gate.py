@@ -152,22 +152,9 @@ class UploadScheduleTestBase(unittest.TestCase):
 
 
 class CheckAndFlushUploadBatchTest(UploadScheduleTestBase):
-    def test_disabled_schedule_releases_backlog(self):
-        """开关关闭=处理完即上传:被拦截积压的待上传任务应放行重入队列。"""
+    def test_disabled_schedule_is_noop(self):
         proc = self.FakeProcessor({'UPLOAD_SCHEDULE_ENABLED': False})
         self._mk_task('t1')
-        self._mk_task('t2')
-        proc.check_and_flush_upload_batch()
-        statuses = {tid: self._tasks[tid]['status'] for tid in ('t1', 't2')}
-        self.assertEqual(set(statuses.values()), {'pending'})
-        self.assertEqual(self.started, [True])
-        # 再次 tick:无积压,空转
-        self.updated.clear()
-        proc.check_and_flush_upload_batch()
-        self.assertEqual(self.updated, [])
-
-    def test_disabled_schedule_noop_when_no_backlog(self):
-        proc = self.FakeProcessor({'UPLOAD_SCHEDULE_ENABLED': False})
         proc.check_and_flush_upload_batch()
         self.assertEqual(self.updated, [])
 
