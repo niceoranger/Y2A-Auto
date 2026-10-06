@@ -16,6 +16,7 @@ import urllib.request
 
 _cache: dict = {}
 _cache_lock = threading.Lock()
+# 默认本机部署;可经 config.json 的 CONTENT_GATE_API_URL / CONTENT_GATE_MODEL 覆盖
 _QWEN_URL = 'http://127.0.0.1:8090/v1/chat/completions'
 _MODEL = '/Users/mac/models/qwen3.8-27b-8bit'
 _SYSTEM = (
@@ -28,14 +29,28 @@ _SYSTEM = (
 )
 
 
+def _gate_endpoint() -> tuple:
+    """返回 (api_url, model),优先读配置,读不到用模块默认。"""
+    try:
+        from .config_manager import load_config
+        cfg = load_config()
+        return (
+            str(cfg.get('CONTENT_GATE_API_URL') or _QWEN_URL),
+            str(cfg.get('CONTENT_GATE_MODEL') or _MODEL),
+        )
+    except Exception:
+        return _QWEN_URL, _MODEL
+
+
 def _qwen_classify(title: str) -> bool:
+    api_url, model = _gate_endpoint()
     body = json.dumps({
-        'model': _MODEL,
+        'model': model,
         'messages': [{'role': 'system', 'content': _SYSTEM},
                      {'role': 'user', 'content': title}],
         'max_tokens': 500, 'enable_thinking': False,
     }, ensure_ascii=False).encode()
-    req = urllib.request.Request(_QWEN_URL, data=body,
+    req = urllib.request.Request(api_url, data=body,
                                  headers={'Content-Type': 'application/json'})
     r = json.load(urllib.request.urlopen(req, timeout=60))
     text = (r['choices'][0]['message'].get('content') or '').strip()

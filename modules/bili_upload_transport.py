@@ -14,11 +14,35 @@
 不影响应用内其他 bilibili_api 调用（登录/QR 等）。
 """
 import asyncio
+import os
 import threading
 
 _LOCK = threading.Lock()
 _ACTIVE = 0
 _ORIG = None  # (client, original_request)
+
+
+def _load_bili_cookie_pairs():
+    """读取扫码登录落盘的B站cookie(配置键 BILIBILI_COOKIES_PATH),返回 (name,value) 列表。
+
+    机会性补全,文件缺失/格式异常时返回空列表(维持仅传库内cookie的旧行为);
+    相对路径以仓库根目录(modules/..)解析,不依赖进程工作目录。
+    """
+    try:
+        from .config_manager import load_config
+        cookies_path = str(load_config().get('BILIBILI_COOKIES_PATH') or 'cookies/bili_cookies.json')
+        if not os.path.isabs(cookies_path):
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cookies_path = os.path.join(repo_root, cookies_path)
+        import json as _json
+        with open(cookies_path, encoding='utf-8') as f:
+            data = _json.load(f)
+        if isinstance(data, dict):
+            data = data.get('cookies') or []
+        return [(str(c.get('name')), str(c.get('value')))
+                for c in data if isinstance(c, dict) and c.get('name')]
+    except Exception:
+        return []
 
 
 class _Resp:
@@ -67,12 +91,8 @@ def _make_patched_request(orig_request):
             merged_cookies = dict(cookies or {})
             # WAF 要求 preupload 带 SESSDATA 完整 cookie；库只传 buvid 子集，此处补全
             if 'bilibili.com' in url and 'SESSDATA' not in merged_cookies:
-                try:
-                    import json as _json
-                    for c in _json.load(open('/Users/mac/Y2A-Auto/cookies/bili_cookies.json')):
-                        merged_cookies.setdefault(c['name'], c['value'])
-                except Exception:
-                    pass
+                for _name, _value in _load_bili_cookie_pairs():
+                    merged_cookies.setdefault(_name, _value)
             eff_headers = dict(headers or {})
             # UA 必须与 impersonate 的 TLS 指纹配套，外部 UA(不一致的 Chrome 版本)会被 WAF 识破
             eff_headers.pop('User-Agent', None)

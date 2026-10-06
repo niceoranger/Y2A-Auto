@@ -59,6 +59,10 @@ DEFAULT_CONFIG = {
     # 主动消息推送
     "NOTIFY_ENABLED": False,
     "NOTIFY_EVENT_TASK_ADDED": True,
+    # 财经内容门禁(本地 Qwen 分类服务)的接入点;与 content_gate.py 内默认值一致,
+    # 仅在 config.json 中覆盖时生效
+    "CONTENT_GATE_API_URL": "",
+    "CONTENT_GATE_MODEL": "",
     "NOTIFY_EVENT_TASK_COMPLETED": True,
     "NOTIFY_EVENT_TASK_FAILED": True,
     "NOTIFY_EVENT_LOGIN_SUCCESS": True,
@@ -93,8 +97,6 @@ DEFAULT_CONFIG = {
     "COOKIECLOUD_LAST_SYNC_AT": "",
     "COOKIECLOUD_LAST_SYNC_STATUS": "",
     "COOKIECLOUD_LAST_SYNC_MESSAGE": "",
-    "ACFUN_USERNAME": "",
-    "ACFUN_PASSWORD": "",
     "UPLOAD_TARGET_DEFAULT": "acfun",  # [已废弃,仅向后兼容] 旧单枚举:acfun|bilibili|both
     # AI 重制管线(Phase 3)——WhisperX ASR 子系统
     "REMASTER_PIPELINE_ENABLED": False,  # 重制管线总开关,默认关
