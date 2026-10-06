@@ -26,14 +26,44 @@ def get_app_root_dir():
 def get_app_subdir(subdir_name):
     """
     获取应用子目录路径
-    
+
     Args:
         subdir_name (str): 子目录名称，如 'config', 'logs', 'db' 等
-        
+
     Returns:
         str: 子目录的完整路径
     """
     return os.path.join(get_app_root_dir(), subdir_name)
+
+
+import logging
+from logging.handlers import RotatingFileHandler
+
+
+def setup_task_logger(task_id, namespace='task', max_bytes=10485760, backup_count=5):
+    """为特定任务创建/复用追加到 task_{task_id}.log 的日志记录器。
+
+    各模块共用此实现(历史上曾有 7 份近似拷贝);namespace 用于区分
+    logger 注册名(也出现在日志行中),所有模块写入同一个任务日志文件。
+    """
+    log_dir = get_app_subdir('logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file = os.path.join(log_dir, f'task_{task_id}.log')
+    logger = logging.getLogger(f'{namespace}_{task_id}')
+
+    if not logger.handlers:  # 避免重复添加处理器
+        logger.setLevel(logging.INFO)
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
+        )
+        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(logging.INFO)
+        logger.addHandler(file_handler)
+        logger.propagate = False
+
+    return logger
 
 import re
 import copy

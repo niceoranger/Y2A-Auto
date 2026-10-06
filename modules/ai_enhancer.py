@@ -136,25 +136,10 @@ _INTERACTION_PATTERNS = [
 
 # --- Helpers: logger/client/cleaner (restored) ---
 def setup_task_logger(task_id):
-    """
-    为特定任务设置日志记录器。
-    """
-    log_dir = get_app_subdir('logs')
-    os.makedirs(log_dir, exist_ok=True)
+    """追加写入任务日志(共用实现见 utils.setup_task_logger)。"""
+    from .utils import setup_task_logger as _shared
+    return _shared(task_id, namespace='ai_enhancer')
 
-    log_file = os.path.join(log_dir, f'task_{task_id}.log')
-    logger = logging.getLogger(f'ai_enhancer_{task_id}')
-
-    if not logger.handlers:
-        logger.setLevel(logging.INFO)
-        file_handler = RotatingFileHandler(log_file, maxBytes=10485760, backupCount=5, encoding='utf-8')
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(file_formatter)
-        file_handler.setLevel(logging.INFO)
-        logger.addHandler(file_handler)
-        logger.propagate = False
-
-    return logger
 
 def get_openai_client(openai_config):
     """

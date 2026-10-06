@@ -23,18 +23,10 @@ except ImportError as e:
     RuntimeOptions: Any = None
 
 def setup_task_logger(task_id):
-    """
-    使用现有的任务日志器，不创建单独的内容审核日志文件
-    
-    Args:
-        task_id: 任务ID
-        
-    Returns:
-        logging.Logger: 任务日志器
-    """
-    # 导入task_manager中的setup_task_logger
-    from modules.task_manager import setup_task_logger as task_setup_logger
-    return task_setup_logger(task_id)
+    """追加写入任务日志(共用实现见 utils.setup_task_logger)。"""
+    from .utils import setup_task_logger as _shared
+    return _shared(task_id, namespace='content_moderator')
+
 
 class AlibabaCloudModerator:
     """阿里云内容审核类"""

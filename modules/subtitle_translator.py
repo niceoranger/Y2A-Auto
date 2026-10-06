@@ -39,35 +39,10 @@ def _should_fail_translation_residue(total_items: int, unresolved_count: int) ->
     )
 
 def setup_task_logger(task_id):
-    """
-    为特定任务设置日志记录器 (与ai_enhancer.py保持一致)
-    
-    Args:
-        task_id: 任务ID
-        
-    Returns:
-        logger: 配置好的日志记录器
-    """
-    log_dir = get_app_subdir('logs')
-    os.makedirs(log_dir, exist_ok=True)
-    
-    log_file = os.path.join(log_dir, f'task_{task_id}.log')
-    logger = logging.getLogger(f'subtitle_translator_{task_id}')
-    
-    if not logger.handlers:  # 避免重复添加处理器
-        logger.setLevel(logging.INFO)
-        
-        # 文件处理器 - 减少文件大小以降低内存使用
-        file_handler = RotatingFileHandler(log_file, maxBytes=5242880, backupCount=3, encoding='utf-8')
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(file_formatter)
-        file_handler.setLevel(logging.INFO)
-        logger.addHandler(file_handler)
-        
-        # 确保消息不会传播到根日志记录器
-        logger.propagate = False
-    
-    return logger
+    """追加写入任务日志(共用实现见 utils.setup_task_logger)。"""
+    from .utils import setup_task_logger as _shared
+    return _shared(task_id, namespace='subtitle_translator')
+
 
 def get_openai_client(openai_config):
     """
