@@ -15,9 +15,13 @@ def _load_task_processor_class():
         if isinstance(node, ast.ClassDef) and node.name == 'TaskProcessor'
     ]
     isolated_module = ast.Module(body=selected, type_ignores=[])
+    # 字幕排版实现已抽到 modules/subtitle_layout.py,TaskProcessor 内是
+    # 同名委托桩;类体 exec 后调用桩时从全局命名空间解析该模块
+    from modules import subtitle_layout
     namespace = {
         'os': os,
         'unicodedata': unicodedata,
+        'subtitle_layout': subtitle_layout,
         'logger': logging.getLogger('test_task_processor_layout'),
     }
     exec(compile(isolated_module, str(module_path), 'exec'), namespace)
