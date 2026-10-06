@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import os
+import copy
 import json
+import threading
 import logging
 from .utils import get_app_subdir
 from .speech_pipeline_settings import (
@@ -353,15 +355,51 @@ def _normalize_upload_targets_value(value):
     return normalize_upload_targets(value)
 
 
+# 配置缓存：load_config 调用密度极高（每个请求/下载转码循环都会调用），
+# 以 (路径, mtime_ns, size) 为键缓存解析结果；本进程 save_config 写盘后同步刷新，
+# 外部进程修改文件时 stat 变化自动失效。返回深拷贝，调用方改字典不污染缓存。
+_CONFIG_CACHE_LOCK = threading.Lock()
+_CONFIG_CACHE: dict = {"path": None, "mtime_ns": None, "size": None, "config": None}
+
+
+def _config_cache_key(config_path):
+    """返回配置文件的 (mtime_ns, size)，文件不可访问时返回 None。"""
+    try:
+        st = os.stat(config_path)
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
+def _store_config_cache(config_path, config):
+    key = _config_cache_key(config_path)
+    if key is None:
+        return
+    with _CONFIG_CACHE_LOCK:
+        _CONFIG_CACHE["path"] = config_path
+        _CONFIG_CACHE["mtime_ns"], _CONFIG_CACHE["size"] = key
+        _CONFIG_CACHE["config"] = copy.deepcopy(config)
+
+
 def load_config():
     """
     加载配置文件，如果不存在则创建默认配置
-    
+
     Returns:
         dict: 配置字典
     """
     config_path = os.path.join(get_app_subdir('config'), 'config.json')
-    
+
+    with _CONFIG_CACHE_LOCK:
+        key = _config_cache_key(config_path)
+        if (
+            key is not None
+            and _CONFIG_CACHE["path"] == config_path
+            and (_CONFIG_CACHE["mtime_ns"], _CONFIG_CACHE["size"]) == key
+            and _CONFIG_CACHE["config"] is not None
+        ):
+            return copy.deepcopy(_CONFIG_CACHE["config"])
+
     # 确保config目录存在
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     
@@ -461,6 +499,7 @@ def load_config():
                     if removed_keys:
                         logger.info("已清理过期配置项: %s", ', '.join(sorted(removed_keys)))
                     save_config(config, config_path)
+                _store_config_cache(config_path, config)
                 return config
     except (json.JSONDecodeError, FileNotFoundError, PermissionError) as e:
         logger.warning(f"读取配置文件时出错: {str(e)}")
@@ -490,6 +529,8 @@ def save_config(config, config_path=None):
     try:
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=4)
+        # 写盘成功后同步刷新缓存，保证本进程"读己之写"，不受 mtime 粒度影响
+        _store_config_cache(config_path, config)
         logger.info("配置已保存到文件")
         return True
     except Exception as e:
