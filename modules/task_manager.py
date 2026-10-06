@@ -8526,28 +8526,32 @@ class TaskProcessor:
 
         return get_task(task_id) or task
 
-    def _upload_to_bilibili(self, task_id, task_logger, subtitle_prepared=False):
-        """上传到 Bilibili - 带并发控制"""
+    def _ensure_upload_semaphore(self, task_logger):
+        """确保上传信号量已初始化；懒初始化沿用当前配置的并发上限，不再写死 1。"""
+        global upload_semaphore
+        if upload_semaphore is None:
+            task_logger.warning("upload_semaphore 为 None，正在初始化...")
+            init_upload_semaphore(self._current_max_concurrent_uploads)
+            task_logger.info(f"upload_semaphore 初始化完成，当前值: {upload_semaphore}")
+        return upload_semaphore
+
+    def _run_exclusive_upload(self, task_id, task_logger, platform_label, upload_fn):
+        """上传并发控制统一包装：信号量内独占执行，异常记 traceback 并置任务失败。"""
         task = get_task(task_id)
         if not task:
             task_logger.error("任务不存在")
             return
 
-        global upload_semaphore
-        if upload_semaphore is None:
-            task_logger.warning("upload_semaphore 为 None，正在初始化...")
-            init_upload_semaphore(1)
-            task_logger.info(f"upload_semaphore 初始化完成，当前值: {upload_semaphore}")
-            if upload_semaphore is None:
-                task_logger.error("upload_semaphore 初始化失败，无法继续执行任务")
-                return
+        semaphore = self._ensure_upload_semaphore(task_logger)
+        if semaphore is None:
+            task_logger.error("upload_semaphore 初始化失败，无法继续执行任务")
+            return
 
         task_logger.info("等待获取上传锁...")
         try:
-            assert upload_semaphore is not None, "upload_semaphore 应该已经初始化"
-            with upload_semaphore:
-                task_logger.info("获得上传锁，开始上传到 Bilibili")
-                self._do_upload_to_bilibili(task_id, task_logger, subtitle_prepared=subtitle_prepared)
+            with semaphore:
+                task_logger.info(f"获得上传锁，开始上传到 {platform_label}")
+                upload_fn()
                 task_logger.info("释放上传锁")
         except Exception as e:
             task_logger.error(f"获取或使用上传锁时出错: {e}")
@@ -8559,48 +8563,20 @@ class TaskProcessor:
                 error_message=f"上传锁异常: {str(e)}"
             )
             return
+
+    def _upload_to_bilibili(self, task_id, task_logger, subtitle_prepared=False):
+        """上传到 Bilibili - 带并发控制"""
+        self._run_exclusive_upload(
+            task_id, task_logger, 'Bilibili',
+            lambda: self._do_upload_to_bilibili(task_id, task_logger, subtitle_prepared=subtitle_prepared),
+        )
 
     def _upload_to_acfun(self, task_id, task_logger, subtitle_prepared=False):
         """上传到AcFun - 带并发控制"""
-        from modules.acfun_uploader import AcfunUploader
-        
-        task = get_task(task_id)
-        if not task:
-            task_logger.error("任务不存在")
-            return
-        
-        # 使用信号量控制并发上传
-        global upload_semaphore
-        if upload_semaphore is None:
-            task_logger.warning("upload_semaphore 为 None，正在初始化...")
-            init_upload_semaphore(1)
-            task_logger.info(f"upload_semaphore 初始化完成，当前值: {upload_semaphore}")
-            # 确保初始化成功
-            if upload_semaphore is None:
-                task_logger.error("upload_semaphore 初始化失败，无法继续执行任务")
-                return
-        else:
-            task_logger.info(f"upload_semaphore 已初始化，当前值: {upload_semaphore}")
-        
-        task_logger.info("等待获取上传锁...")
-        try:
-            # 类型断言，告诉 Pylance upload_semaphore 不是 None
-            assert upload_semaphore is not None, "upload_semaphore 应该已经初始化"
-            with upload_semaphore:
-                task_logger.info("获得上传锁，开始上传到AcFun")
-                self._do_upload_to_acfun(task_id, task_logger, subtitle_prepared=subtitle_prepared)
-                task_logger.info("释放上传锁")
-        except Exception as e:
-            task_logger.error(f"获取或使用上传锁时出错: {e}")
-            import traceback
-            task_logger.error(traceback.format_exc())
-            # 确保更新任务状态为失败
-            update_task(
-                task_id,
-                status=TASK_STATES['FAILED'],
-                error_message=f"上传锁异常: {str(e)}"
-            )
-            return
+        self._run_exclusive_upload(
+            task_id, task_logger, 'AcFun',
+            lambda: self._do_upload_to_acfun(task_id, task_logger, subtitle_prepared=subtitle_prepared),
+        )
     
     def _do_upload_to_acfun(self, task_id, task_logger, subtitle_prepared=False):
         """实际执行上传到AcFun的逻辑"""
@@ -9277,37 +9253,41 @@ def force_upload_task(task_id, config=None):
         update_task(task_id, status=TASK_STATES['FAILED'], error_message=f"强制上传失败: {str(e)}")
         return False
 
-# 全局任务处理器实例
+# 全局任务处理器实例及其锁：多个 Flask 请求线程会并发获取/刷新/关闭处理器，
+# check-then-set 必须持锁，否则可能创建出两个处理器（各自启动调度器重复执行周期任务）
 _global_task_processor = None
+_GLOBAL_PROCESSOR_LOCK = threading.Lock()
 
 def get_global_task_processor(config=None):
     """
     获取全局任务处理器实例，确保并发控制生效
-    
+
     Args:
         config: 配置信息
-        
+
     Returns:
         TaskProcessor: 全局任务处理器实例
     """
     global _global_task_processor
-    
-    if _global_task_processor is None:
-        logger.info("创建全局任务处理器实例")
-        _global_task_processor = TaskProcessor(config)
-    elif config:
-        logger.info("配置已更新，刷新全局任务处理器运行时配置")
-        _global_task_processor.refresh_config(config)
-    
-    return _global_task_processor
+
+    with _GLOBAL_PROCESSOR_LOCK:
+        if _global_task_processor is None:
+            logger.info("创建全局任务处理器实例")
+            _global_task_processor = TaskProcessor(config)
+        elif config:
+            logger.info("配置已更新，刷新全局任务处理器运行时配置")
+            _global_task_processor.refresh_config(config)
+
+        return _global_task_processor
 
 def shutdown_global_task_processor():
     """关闭全局任务处理器"""
     global _global_task_processor
-    if _global_task_processor:
-        _global_task_processor.shutdown()
-        _global_task_processor = None
-        logger.info("全局任务处理器已关闭")
+    with _GLOBAL_PROCESSOR_LOCK:
+        if _global_task_processor:
+            _global_task_processor.shutdown()
+            _global_task_processor = None
+            logger.info("全局任务处理器已关闭")
 
 # 初始化数据库
 init_db() 
